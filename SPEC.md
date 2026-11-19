@@ -1,0 +1,843 @@
+# Query Tarantino · Stage 2 · SPEC
+
+Version 1.11 · November 7, 2026
+
+Stage 2 contracts. Everything shared by two or more modules has its literal name here and, in code, lives only in `common`. If something is not here, ask before inventing it.
+
+- It replaces the Stage 1 `SPEC.md`, which was the cross-language contract and does not move to `stage_2`.
+- The reasons behind each decision are in the Stage 2 plan, which the team keeps outside the repository. If the plan and this file disagree, this file wins and the plan gets fixed.
+- A contract change goes in a separate PR reviewed by all four members. That PR bumps the version of this file and updates `common`, `api/openapi.yaml` and, when affected, the plan and the team's notes for each module, all at once. Nobody changes a contract inside the PR for their own service.
+
+## 1. Scope and assumptions
+
+`crawler` downloads books from Project Gutenberg, `indexer` indexes them in batches, `query` searches with TF-IDF and `control` seeds and reconciles. The services keep the texts in the datalake and the source of truth in MongoDB, and coordinate in one of four modes (§11). In the default one, `hazelcast`, which the rest of this file describes, they never call each other: they coordinate through Hazelcast.
+
+Everything runs on one machine with Docker Compose. The design depends on these assumptions, which Stage 3 will have to lift:
+
+- Addresses are Compose service names on a single network, and nginx is the only entry point from the host.
+- The datalake is a local volume, mounted at the same path in `crawler`, `indexer` and `control`.
+- There is a single Hazelcast member: if it goes down, the queues are lost and `control` rebuilds them from Mongo.
+- MongoDB is a single server without replicas. Every state change is a single-document write, with no transactions.
+- All containers share the host clock. Expirations are compared with Mongo's time (`$$NOW`); the host clock is only used in logs and in the `mtime` of `.tmp` files.
+
+## 2. Architecture
+
+### 2.1 Diagram
+
+```mermaid
+flowchart TB
+  FE["Front-end"]
+  ADM["Scripts and admin"]
+  subgraph HOST["One host: the Docker Compose network"]
+    NG["nginx: 8080 front-end, 8081 operations"]
+    CT["control ×1 :7004<br/>reconciliation thread"]
+    CR["crawler ×N :7001<br/>8 download threads each"]
+    IX["indexer ×N :7002<br/>1 batch thread each"]
+    Q["query ×N :7003<br/>1 snapshot thread each"]
+    subgraph HZ["Hazelcast ×1 :5701"]
+      QD[["books-to-download"]]
+      QI[["books-to-index"]]
+      TP(("published-batches"))
+    end
+    DL[("datalake volume")]
+    M[("MongoDB ×1 :27017")]
+  end
+  FE -->|":8080"| NG
+  ADM -->|":8081"| NG
+  NG -->|"/control/*"| CT
+  NG -->|"/ingest/*"| CR
+  NG -->|"/index/*"| IX
+  NG -->|"/search, /books, /search/filters"| Q
+  CT -->|"seeding and rescues"| QD
+  QD --> CR
+  CR -->|"POST /ingest and retries"| QD
+  CR -->|"download complete"| QI
+  CT -->|"rescues and reindexing"| QI
+  QI --> IX
+  IX -->|"POST /index/update"| QI
+  IX -->|"BatchPublished"| TP
+  TP --> Q
+  CR -->|"header and body"| DL
+  DL --> IX
+  CT -->|"deletes old .tmp"| DL
+  CR & IX & CT & Q <--> M
+```
+
+The life of a book: `control` seeds it, `crawler` downloads and enqueues it, `indexer` publishes it in a batch and `query` shows it.
+
+The diagram is mode `hazelcast`. The other modes (§11) only change how work reaches the workers and how `query` learns of a batch: §11.1 says what takes Hazelcast's place in each, and nothing else in the diagram moves.
+
+### 2.2 Modules
+
+| Module | Responsibility | Deployment |
+| --- | --- | --- |
+| `common` | Shared contracts: names, enums, records, JSON, configuration, tokenizer, stopwords, datalake paths, languages, Problem Details, the `book_id` parser (§6.2), `/health`, transition logs, crash points and the lease heartbeat (§5.1); in Mongo, the client, the indexes, “Create the pointer”, “Create the state”, reading a book's state (§6.2) and the books that block a generation switch (§5.4) | Dependency of the others |
+| `crawler` | Ingestion: consumes `books-to-download`, claims each book, downloads it from Gutenberg or the local mirror, writes header and body and enqueues it in `books-to-index` | N replicas |
+| `indexer` | Indexing: groups `books-to-index` into batches, writes metadata and postings into the write generation, publishes the batch and notifies | N replicas |
+| `query` | Search: keeps a snapshot of the published batches of the current generation and serves `/search`, `/books/{book_id}` and `/search/filters` | N replicas behind nginx |
+| `control` | Seeds the candidates, reconciles expired leases and lost messages, drives rebuilds and cleans the datalake and old generations | One replica |
+| `bench` | Load generator, recovery checks (§8), result processing and XChart charts for the integration benchmarks | Not deployed; the Compose `bench` service runs it on demand (§2.4) |
+| `checks` | Functional API checks (F4) against the running stack and against `api/openapi.yaml` | Not deployed |
+
+Each service is one process per replica, and each process runs these threads. Requests never run work: a handler only validates, writes state and enqueues (§3), so the HTTP pool only waits on MongoDB and the broker.
+
+| Process | Replicas | Threads |
+| --- | --- | --- |
+| `crawler` | N with `--scale`, 1 by default | `TARANTINO_PARALLEL_DOWNLOADS` download workers (`download-<i>`, 8 by default), each with its own queue handles; one lease heartbeat per book being downloaded, on a virtual thread; Javalin's HTTP pool |
+| `indexer` | N, 1 by default | One batch loop (`index-batches`); one lease heartbeat per open batch, on a virtual thread; Javalin's HTTP pool |
+| `query` | N, 1 by default | One snapshot thread (`snapshot`), the only one that refreshes; the topic listener and the internal refresh route only ask it to; Javalin's HTTP pool, which only reads the snapshot |
+| `control` | Always 1 | One `reconciliation` thread for the reconciliation and the datalake cleanup, which therefore never overlap; in mode `orchestrator`, one `orchestrator` thread for its ticks (§11.4); Javalin's HTTP pool |
+| `mongo`, `hazelcast`, `activemq` and `nginx` | 1 each | Their own; nginx runs `worker_processes auto`, one per CPU |
+
+Javalin's pool goes from 8 to 250 threads unless `TARANTINO_HTTP_THREADS` caps it (§4.7). Within a process, threads only share an immutable snapshot or a `java.util.concurrent` structure: the `query` snapshot behind an `AtomicReference`, the local queues of mode `orchestrator` (`ArrayBlockingQueue`) and the books the orchestrator has in flight (`ConcurrentHashMap`); the code takes no lock of its own. Replicas share nothing in memory: they only meet in MongoDB, through the conditional writes of §5.1, and in the broker of the mode, so no in-process lock is ever needed to keep two replicas apart.
+
+How the design keeps replicas and threads from getting in each other's way:
+
+- Duplicate work: a message, an HTTP call or a poll is only a hint. The claim in MongoDB (§5.1) lets one worker take a book or a batch, and a duplicate fails its claim and is dropped.
+- Conflicting writes: every state change is one conditional single-document write, with the current state and the `claim_id` in its filter; a worker that loses its lease writes nothing else, and whoever fails a write does not retry it (§5.1). So a book is in one live batch at most (§5.2).
+- Thread exhaustion: handlers answer in milliseconds and never wait for a job (§6.7), and the internal routes offer to a bounded local queue and answer `503` when it is full instead of blocking (§11.4). Worker threads are a fixed number per replica and never grow with the load, and a JVM that runs out of memory exits (§2.4).
+- Contention: replicas compete for MongoDB, the broker and the datalake volume, which are single on this host (§1). Batches share a per-batch cost among their books, postings go in `bulkWrite`s of 1,000 terms, and `query` reads an immutable snapshot without locks; the experiments of §9 measure what is left of that contention.
+
+### 2.3 Repository and owners
+
+```text
+stage_2/
+├── SPEC.md, README.md
+├── report/                  QueryTarantino_Stage2_Report.tex and its PDF
+├── pom.xml                  parent: modules and every version
+├── docker-compose.yml, docker-compose.mirror.yml, Dockerfile, .dockerignore, .gitignore
+├── docker-compose.activemq.yml, docker-compose.activemq-persistent.yml, docker-compose.polling.yml, docker-compose.orchestrator.yml
+├── activemq/activemq.xml
+├── common/
+├── services/
+│   ├── crawler/
+│   ├── indexer/
+│   ├── query/
+│   └── control/
+├── bench/
+├── checks/
+├── api/openapi.yaml
+├── nginx/nginx.conf
+├── scripts/
+│   ├── fill_cache.sh        from Stage 1
+│   ├── bench/<experiment>.sh, trials.sh, modes.sh, all.sh
+│   └── recovery/<nn>-<row>.sh
+├── docs/running.md          running and configuration
+├── workload/                sample_ids.txt, book_ids.txt, queries.txt, stopwords.txt, corpus.sha256
+└── benchmarks/README.md, benchmarks/runs/<run_id>/
+```
+
+| Path | Owner |
+| --- | --- |
+| `services/crawler`, `docker-compose.yml`, its overrides, `activemq/` and `Dockerfile` | A |
+| `services/indexer` | B |
+| `services/query`, `nginx/`, `api/openapi.yaml`, `checks/` | C |
+| `services/control`, `scripts/recovery/` | D |
+| `bench/` | C, the load generator; D, the shared part, the recovery checks and result processing |
+| `scripts/bench/<experiment>.sh` | Whoever owns the experiment (§9) |
+| `common`, `SPEC.md`, parent `pom.xml`, `workload/` | All four, in a separate PR |
+| `README.md` | Each PR updates the lines of its piece; D updates the Status section when each gate closes |
+
+- Dependency and plugin versions live only in the parent `pom.xml` (`dependencyManagement` and `pluginManagement`). The Hazelcast client uses the same version as the member image.
+- `benchmarks/runs/` is versioned; `benchmarks/cache/`, `benchmarks/mirror/`, `benchmarks/tmp.noindex/`, `datalake/` and `target/` stay out of git, and so do the plan and the team's notes, which are shared outside it.
+
+### 2.4 Docker Compose
+
+- Services: `mongo`, `hazelcast`, `crawler`, `indexer`, `query`, `control` and `nginx`, plus `bench` under the `tools` profile, which only starts with `docker compose run`. None uses `container_name`, so that `docker compose up -d --scale crawler=3 --scale indexer=3 --scale query=2` works. `control` always has one replica.
+- Only nginx publishes ports on the host: 8080, and 8081 only on `127.0.0.1`, because the operational routes have no authentication and anyone on the network could otherwise open rebuilds or ingest arbitrary ids. For debugging, use `docker compose exec`.
+- Pinned image versions, never `latest`: `mongo:7.0`, as in Stage 1; `hazelcast/hazelcast` with `HZ_CLUSTERNAME=tarantino`; `nginx`; and for the four services one shared `Dockerfile` on `eclipse-temurin:25-jre`, which copies the service jar and adds `curl` for the healthcheck, because the image does not ship it.
+- Addresses: `TARANTINO_MONGO_URI=mongodb://mongo:27017/tarantino` and `TARANTINO_HAZELCAST=hazelcast:5701`.
+- Volumes: the `datalake` volume at `/data/datalake` in `crawler`, `indexer` and `control`, with `TARANTINO_DATALAKE=/data/datalake`; `./workload`, read-only, at `/app/workload` in `indexer`, `query` and `control`, with `TARANTINO_WORKLOAD=/app/workload`. When the local mirror is used, `docker-compose.mirror.yml` mounts `benchmarks/mirror/` read-only in `crawler` and `control` and points `TARANTINO_MIRROR` to that path; without it, `crawler` downloads over HTTP.
+- The timing variables (§4.7) are defined once in a shared block and reach every service with the same values. The same block sets `JAVA_TOOL_OPTIONS: ${JAVA_TOOL_OPTIONS:--Xmx512m -XX:+ExitOnOutOfMemoryError}`, so every JVM has a fixed heap, which `manifest.json` records (§9), and a JVM that runs out of memory exits. Without that flag an `OutOfMemoryError` only kills the thread that threw it: an indexer lost its batch loop that way while `/health` kept answering `UP`. For the same reason a service exits with code 1 when one of its worker threads or periodic tasks (§2.2) dies with anything the task does not handle itself; `WorkerThreads`, in `common`, starts and wraps them.
+- `crawler` gets `TARANTINO_CRASH_AT: ${CRAWLER_CRASH_AT:-}` and `indexer` gets `TARANTINO_CRASH_AT: ${INDEXER_CRASH_AT:-}`, outside the shared block, because the point must belong to the service that starts (§4.7). A recovery script sets one with `CRAWLER_CRASH_AT=after-claim docker compose up -d --scale crawler=N crawler` and removes it by running the same command without the variable. It always passes `--scale`, or Compose goes back to one replica.
+- `query` gets `TARANTINO_CORS_ORIGIN: ${TARANTINO_CORS_ORIGIN:-*}`.
+- `bench` runs `bench/target/bench-1.0-SNAPSHOT.jar` on `eclipse-temurin:25-jre`, with `./workload` read-only at `/app/workload` and `./benchmarks/runs` at `/app/benchmarks/runs`. It reaches Mongo through `TARANTINO_MONGO_URI` and nginx at `http://nginx:8080` and `http://nginx:8081`. Scripts launch it with `docker compose run --rm bench <command>`.
+- Healthchecks: each service, `curl -fsS http://localhost:<port>/health`; `mongo`, `mongosh --quiet --eval "db.adminCommand('ping')"`.
+- Startup: each service opens its HTTP port first and retries the connection to Mongo and Hazelcast without limit. Until it connects, `/health` answers `503` and it consumes no queues, so startup order does not matter. If anything else fails while it starts, such as reading `stopwords.txt` or the candidates, it exits with code 1 instead of answering `UP` with no worker behind it.
+- Services do not restart on their own (`restart: "no"`): the recovery tests decide when each one comes back.
+- The other coordination modes (§11) start with an override after `docker-compose.yml` and `docker-compose.mirror.yml`: `docker-compose.activemq.yml`, `docker-compose.activemq-persistent.yml` (always after the first), `docker-compose.polling.yml` and `docker-compose.orchestrator.yml`. Each sets `TARANTINO_COORDINATION` in the four services and `deploy: {replicas: 0}` in `hazelcast`.
+- The `activemq` service runs `apache/activemq-classic` under the `activemq` profile, so it only starts with `COMPOSE_PROFILES=activemq`, in both `activemq` modes. Like `hazelcast`, it publishes no ports and has no healthcheck.
+- nginx has a third server on 8082, not published to the host, for the internal routes of mode `orchestrator` (§6.1).
+
+## 3. Code
+
+- Hexagonal architecture as in Stage 1: `model`, `ports`, `adapters` and `commands`, with each service's `Main` and factory wiring the pieces through constructors, without injection frameworks.
+- `model` and `commands` do not import Javalin, the Mongo driver, `org.bson`, Hazelcast or HTTP clients.
+- Each service defines its ports in its `ports` package, like `InvertedIndexStorage`, `MetadataStorage` or `DatalakeReader` in the Stage 1 `indexer`. `common` defines no ports.
+- Mongo filters and pipelines live only in `adapters`. The writes used by several services are in `common` (§5.1); the rest, in the Mongo adapter of the service that performs them.
+- Immutable records for messages, responses and the `query` snapshot; no `synchronized` and no locks on the `query` read path.
+- Javalin handlers only validate, write state and enqueue: they never download or index.
+- SOLID and KISS: no transactions, no brokers besides those of the coordination modes (§11) and no layers that a second use does not call for.
+
+## 4. Shared contracts
+
+### 4.1 Formats
+
+- snake_case JSON in the API, in Mongo and in Hazelcast.
+- ISO-8601 UTC dates with `Z`, like `2026-10-21T10:05:00Z`; they may carry a fraction of a second. In Mongo they are `Date`.
+- `book_id` is a positive integer (`Int32` in Mongo). `batch_id` is an `ObjectId`, which travels in JSON as its 24 hexadecimal characters.
+- There is a single `ObjectMapper`, the one in `TarantinoJson` in `common`: Jackson with `JavaTimeModule`, snake_case, dates as text and unknown fields ignored.
+
+### 4.2 Hazelcast
+
+Hazelcast runs as one member in its own container (cluster `tarantino`, port 5701) and the services connect as clients, which reconnect on their own if it goes down. Queues are `IQueue<String>` and the topic is an `ITopic<String>`, carrying `TarantinoJson` JSON, so the member does not need the classes. The names are in `MessagingContracts`, the cluster in `HazelcastContracts` and the records in `common`.
+
+| Name | Type | Message | Produced by | Consumed by |
+| --- | --- | --- | --- | --- |
+| `books-to-download` | Queue | `BookTask` | `control` (seeding, lost messages and expired downloads), `POST /ingest/{book_id}` and `crawler` when retrying a failed download | `crawler` workers |
+| `books-to-index` | Queue | `BookTask` | `crawler` after a complete download, `POST /index/update/{book_id}` and `control` (lost messages, released books and reindexing) | `indexer`, in batches with `drainTo` |
+| `published-batches` | Topic | `BatchPublished` | `indexer`, when publishing a batch | `query` replicas |
+
+| Record | JSON |
+| --- | --- |
+| `BookTask(int bookId, Instant enqueuedAt)` | `{"book_id": 1342, "enqueued_at": "2026-10-21T10:05:00Z"}` |
+| `BatchPublished(String batchId, int generation, int bookCount, Instant publishedAt)` | `{"batch_id": "6716f0c2a1b2c3d4e5f60718", "generation": 1, "book_count": 100, "published_at": "2026-10-21T10:06:00Z"}` |
+
+- Hazelcast is not the source of truth: a message can be lost or repeated, and no ordering is assumed.
+- A message is acknowledged by the claim in Mongo. If the conditional write does not match, the message is a duplicate or stale and is simply dropped.
+- `BookTask.enqueued_at` is the producer's time (`Instant.now()`) and is only used to measure queue wait (§4.8). Rescuing lost messages uses `book_states.enqueued_at`, which is written with `$$NOW` (§5.3).
+- `BatchPublished` copies the batch as “Publish a batch” left it (§5.1): `book_count` is the size of its `book_ids`, at least 1, and `published_at` is its `published_at`.
+- If enqueuing fails after writing to Mongo, the book stays in its state and `control` enqueues it again (§5.3).
+- A lost `BatchPublished` does not matter: `query` re-reads the batches every `TARANTINO_SNAPSHOT_SECONDS`. Generation switches are not announced.
+
+In mode `activemq` the same names are JMS queues and a JMS topic (§11.2); in modes `polling` and `orchestrator` there are no messages. The names are in `MessagingContracts`.
+
+### 4.3 Mongo collections
+
+The database is the one in the path of `TARANTINO_MONGO_URI`, or `tarantino`, as in Stage 1. `book_states` and `index_state` are single collections; the other three carry their generation suffix, `_g<n>` (`postings_g1`), and their names always come from `common`. The state collection is not called `books` because in Stage 1 that collection held the metadata.
+
+**`book_states`**: one document per book.
+
+| Field | Type | Content |
+| --- | --- | --- |
+| `_id` | Int32 | `book_id` |
+| `status` | String | Book state (§4.5) |
+| `attempts` | Int32 | Downloads started |
+| `claim_id` | String | Lease UUID; only in `DOWNLOADING` |
+| `lease_until` | Date | Lease end; only in `DOWNLOADING` |
+| `batch_id` | ObjectId | Batch that claimed it; only in `INDEXING` and `PUBLISHED` |
+| `generation` | Int32 | Generation of the last batch that claimed it; absent until then |
+| `last_error` | String or null | Last error (§4.5), also while the book is retried; `null` after a successful download and when a `FAILED` book is retried |
+| `enqueued_at` | Date | Last time it was put on a queue, with `$$NOW` |
+| `downloaded_at`, `published_at` | Date | When it last reached that state; absent until then |
+| `updated_at` | Date | Last write |
+
+**`metadata_g<n>`**: one document per book.
+
+| Field | Type | Content |
+| --- | --- | --- |
+| `_id` | Int32 | `book_id` |
+| `title` | String or null | `Title:` from the header |
+| `author` | String or null | `Author:` as it comes |
+| `author_terms` | [String] | Author words through the tokenizer, without repeats |
+| `languages` | [String] | ISO 639-1 codes, in header order; a name without a code does not appear here |
+| `language_names` | [String] | Names as they come (`English`), including those without a code |
+| `year` | Int32 or null | Year from `Release date:`, never confused with the number in `[eBook #1342]` |
+| `original_year` | Int32 or null | Year from `Original publication:` |
+
+**`postings_g<n>`**: one document per term and batch. The field is called `term`, as in Stage 1, never `word`.
+
+| Field | Type | Content |
+| --- | --- | --- |
+| `_id` | ObjectId | Automatic |
+| `term` | String | Tokenizer term |
+| `batch_id` | ObjectId | Batch that wrote it |
+| `book_ids` | [Int32] | Books of the batch that contain the term, ascending |
+| `tfs` | [Int32] | Term frequency in each book, at the same position as in `book_ids` |
+
+**`batches_g<n>`**: one document per batch.
+
+| Field | Type | Content |
+| --- | --- | --- |
+| `_id` | ObjectId | `batch_id`, created by the indexer |
+| `status` | String | Batch state (§4.5) |
+| `claim_id` | String | UUID of the indexer's lease |
+| `owner` | String | Hostname of the replica writing it, for the logs |
+| `lease_until` | Date | Lease end; only in `WRITING` |
+| `book_ids` | [Int32] | Empty in `WRITING`; once published, the final books, ascending and at least one |
+| `opened_at`, `published_at`, `abandoned_at` | Date | When it reached that state; absent until then |
+
+**`index_state`**: two documents.
+
+| `_id` | Fields | Content |
+| --- | --- | --- |
+| `"current"` | `generation` Int32, `switched_at` Date | Generation served by `query`. It starts at 1, and any service creates it at startup with “Create the pointer” |
+| `"rebuild"` | `target_generation` Int32, `status` String, `requested_at` Date, `switched_at` Date or null | Rebuild in progress, or the last one finished; `switched_at` is `null` while `RUNNING` |
+
+### 4.4 Indexes
+
+Each service ensures at startup the indexes of the collections it uses, and the indexer ensures those of a generation before its first write to it. The definitions are in `common` and `createIndex` is idempotent.
+
+| Collection | Index | Purpose |
+| --- | --- | --- |
+| `book_states` | `{status: 1, enqueued_at: 1}` | Lost messages and `GET /ingest/list` |
+| `book_states` | `{status: 1, lease_until: 1}` | Downloads with an expired lease |
+| `book_states` | `{batch_id: 1}` | Books of a batch when publishing or releasing it |
+| `book_states` | `{generation: 1, status: 1}` | Reindexing and books pending in a rebuild |
+| `metadata_g<n>` | `{author_terms: 1}`, multikey | `author` filter |
+| `metadata_g<n>` | `{languages: 1, year: 1}`, multikey | `language` filter, alone or with `year` |
+| `metadata_g<n>` | `{year: 1}` | `year` filter alone |
+| `postings_g<n>` | `{term: 1, batch_id: 1}`, unique | `query` reads and indexer upserts |
+| `postings_g<n>` | `{batch_id: 1}` | Deleting the postings of an abandoned batch |
+| `batches_g<n>` | `{status: 1, lease_until: 1}` | Published batches and expired batches |
+| `index_state` | `_id` only | |
+
+### 4.5 States and codes
+
+They are written in uppercase and only these. In Java they are `common` enums, and in Mongo and JSON they travel as their name.
+
+| Book (`book_states.status`) | Meaning | Written by |
+| --- | --- | --- |
+| `QUEUED` | Waiting in `books-to-download` | `control` when seeding and when releasing an expired download; `POST /ingest`; `crawler` when retrying a failed download |
+| `DOWNLOADING` | Claimed by a `crawler` worker | `crawler` |
+| `DOWNLOADED` | In the datalake, waiting for a batch | `crawler`; `control` when releasing a batch's books or reindexing |
+| `INDEXING` | Claimed by a `WRITING` batch | `indexer` |
+| `PUBLISHED` | Searchable in its batch's generation | `indexer`; `control` when completing a publication |
+| `FAILED` | No more retries; the reason is in `last_error` | `crawler`, `indexer` or `control` |
+
+| Batch (`batches_g<n>.status`) | Meaning | Written by |
+| --- | --- | --- |
+| `WRITING` | The indexer is writing its metadata and postings | `indexer`, when opening it |
+| `PUBLISHED` | Visible to `query`; never changes again | `indexer`, with its lease alive |
+| `ABANDONED` | Its lease expired; it will never be seen | `control` |
+
+The rebuild (`index_state.rebuild.status`) only has `RUNNING`, written by `POST /index/rebuild`, and `DONE`, written by `control`.
+
+| `last_error` (`BookErrorCode`) | Written by | What happens |
+| --- | --- | --- |
+| `NOT_FOUND` | `crawler` | Gutenberg or the mirror does not have the book: `FAILED` without retries |
+| `MISSING_MARKERS` | `crawler` | The text lacks the start and end markers: `FAILED` without retries |
+| `NETWORK_ERROR` | `crawler` | The network or the mirror read failed: `QUEUED` up to `TARANTINO_MAX_ATTEMPTS` |
+| `STORAGE_ERROR` | `crawler` | Writing to the datalake failed: `QUEUED` up to `TARANTINO_MAX_ATTEMPTS` |
+| `LEASE_EXPIRED` | `control` | A download lease expired: `QUEUED`, or `FAILED` if `TARANTINO_MAX_ATTEMPTS` were already used |
+| `NOT_IN_DATALAKE` | `indexer` | The claimed book is missing its header or body: `FAILED`; `POST /ingest` retries it |
+
+| Error `code` (`ProblemCode`) | HTTP | When |
+| --- | --- | --- |
+| `MISSING_PARAMETER` | 400 | `q` is missing or blank |
+| `INVALID_PARAMETER` | 400 | A malformed or out-of-range parameter or id |
+| `BOOK_NOT_FOUND` | 404 | The book is not in `book_states` or, in `query`, not in the snapshot |
+| `NOT_DOWNLOADED` | 409 | `POST /index/update` for a book that is not downloaded |
+| `DEPENDENCY_UNAVAILABLE` | 503 | Mongo or Hazelcast do not answer, `query` has no snapshot yet, the generation pointer does not exist yet or nginx finds no replica (§6.6) |
+
+### 4.6 Datalake
+
+- Stage 1 `batch` layout: `<TARANTINO_DATALAKE>/<book_id / 1000>/<book_id>.header.txt` and `<book_id>.body.txt`, with integer division. Book 1342 goes in `datalake/1/` and book 84 in `datalake/0/`. The paths come from `DatalakePaths`, in `common`.
+- Each file is written to `<final name>.<uuid>.tmp`, in the same directory, and renamed with `Files.move(tmp, final, ATOMIC_MOVE)`, which on Linux replaces any existing file. For example, `datalake/1/1342.body.txt.3f2b8c1e-9a4d-4c2e-8f1a-6b7d5e9c0a12.tmp`. Header first and body second, as in Stage 1.
+- A book is in the datalake when its final header and body exist, and `crawler` and `indexer` check both. Since the body is written last, a header without a body is a download that did not finish: it does not count and is overwritten on retry. A body without its header only happens if something outside the services deletes the header: the indexer fails the book with `NOT_IN_DATALAKE` and `POST /ingest` downloads it again.
+- A `.tmp` only exists while it is being written, because the whole book is downloaded into memory before saving. That is why a `.tmp` whose `mtime` is older than `TARANTINO_TMP_MAX_AGE_SECONDS` is an orphan.
+- Only `control` deletes, every `TARANTINO_CLEANUP_SECONDS`, and only those `.tmp` files. `crawler` never deletes anything, and `indexer` only reads.
+- No datalake path is ever exposed through the API.
+
+### 4.7 Configuration
+
+Every variable has a default that works locally, and `docker-compose.yml` sets the container addresses. `TarantinoConfig`, in `common`, reads and validates every variable at startup, in every service. An invalid configuration stops the service with a message that names the variable, as in Stage 1.
+
+| Variable | Default | Used by | Purpose |
+| --- | --- | --- | --- |
+| `TARANTINO_PORT` | 7001, 7002, 7003 and 7004 | All | HTTP port of `crawler`, `indexer`, `query` and `control` |
+| `TARANTINO_HTTP_THREADS` | Javalin's | All | Maximum request threads (8 to 250 in Javalin 6) |
+| `TARANTINO_MONGO_URI` | `mongodb://localhost:27017` | All | MongoDB, as in Stage 1 |
+| `TARANTINO_HAZELCAST` | `localhost:5701` | All | Hazelcast members, comma-separated |
+| `TARANTINO_HAZELCAST_CLUSTER` | `tarantino` | All | Cluster name |
+| `TARANTINO_DATALAKE` | `datalake` | `crawler`, `indexer`, `control` | Datalake root, the same path in every container |
+| `TARANTINO_WORKLOAD` | `workload` | `indexer`, `query`, `control` | `workload/` directory: `stopwords.txt` and the id lists |
+| `TARANTINO_MIRROR` | None | `crawler`, `control` | Path of a local Gutenberg mirror (`<id>/pg<id>.txt`), as in Stage 1; without it, `crawler` downloads over HTTP |
+| `TARANTINO_CANDIDATES` | `sample_ids.txt` | `control` | Books seeded by `control`: a file in `TARANTINO_WORKLOAD` with one id per line, or `mirror` for every book in the local mirror |
+| `TARANTINO_PARALLEL_DOWNLOADS` | 8 | `crawler` | Download workers per replica, as in Stage 1 |
+| `TARANTINO_MAX_ATTEMPTS` | 3 | `crawler`, `control` | Downloads of a book before `FAILED` |
+| `TARANTINO_INDEX_BATCH` | 100 | `indexer` | Books per batch, as in Stage 1 (1 = book by book) |
+| `TARANTINO_BATCH_TIMEOUT_SECONDS` | 30 | `indexer` | Maximum wait, from the first book, to close a batch |
+| `TARANTINO_LEASE_SECONDS` | 60 | `crawler`, `indexer`, `control` | Duration of a book or batch lease |
+| `TARANTINO_HEARTBEAT_SECONDS` | 20 | `crawler`, `indexer` | How often a lease is renewed |
+| `TARANTINO_RECONCILE_SECONDS` | 30 | `control` | How often it reconciles |
+| `TARANTINO_REQUEUE_SECONDS` | 120 | `control` | Age of `enqueued_at` to requeue when the queue is empty |
+| `TARANTINO_GC_SECONDS` | 600 | `control` | Wait before deleting an `ABANDONED` batch or an old generation |
+| `TARANTINO_TMP_MAX_AGE_SECONDS` | 600 | `control` | Age after which a `.tmp` is an orphan |
+| `TARANTINO_CLEANUP_SECONDS` | 3600 | `control` | How often it cleans the datalake |
+| `TARANTINO_SNAPSHOT_SECONDS` | 5 | `query` | Periodic snapshot refresh |
+| `TARANTINO_CORS_ORIGIN` | `*` | `query` | Origin `query` allows through CORS |
+| `TARANTINO_CRASH_AT` | None | `crawler`, `indexer` | Recovery tests only: point from §8 where the service stops |
+| `TARANTINO_COORDINATION` | `hazelcast` | All | Coordination mode (§11): `hazelcast`, `activemq`, `polling` or `orchestrator` |
+| `TARANTINO_SNAPSHOT_ON_PUBLISH` | `true` | `query` | Refresh the snapshot on each `BatchPublished`; with `false`, only every `TARANTINO_SNAPSHOT_SECONDS` |
+| `TARANTINO_ACTIVEMQ` | `failover:(tcp://localhost:61616)?timeout=1000` | All, mode `activemq` | Broker URL |
+| `TARANTINO_ACTIVEMQ_PERSISTENT` | `false` | All, mode `activemq` | Persistent delivery and acknowledgement after the job (§11.2) |
+| `TARANTINO_POLL_MILLIS` | `200` | `crawler`, `indexer`, mode `polling` | Sleep after a poll that found nothing |
+| `TARANTINO_ORCHESTRATOR_TICK_MILLIS` | `200` | `control`, mode `orchestrator` | Pause between ticks |
+| `TARANTINO_ORCHESTRATOR_DOWNLOAD_WINDOW` | `512` | `control`, mode `orchestrator` | Books dispatched to download and not yet claimed |
+| `TARANTINO_ORCHESTRATOR_INDEX_WINDOW` | `400` | `control`, mode `orchestrator` | Books dispatched to index and not yet claimed |
+| `TARANTINO_ORCHESTRATOR_TARGET` | `http://nginx:8082` | `control`, mode `orchestrator` | Base URL of the internal routes |
+| `TARANTINO_LOCAL_DOWNLOAD_CAPACITY` | `256` | `crawler`, mode `orchestrator` | Capacity of the local download queue |
+| `TARANTINO_LOCAL_INDEX_CAPACITY` | `200` | `indexer`, mode `orchestrator` | Capacity of the local index queue |
+
+Besides every number being a positive integer, these are required:
+
+- `TARANTINO_HEARTBEAT_SECONDS ≤ TARANTINO_LEASE_SECONDS / 3`.
+- `TARANTINO_GC_SECONDS ≥ 10 × TARANTINO_LEASE_SECONDS` and `TARANTINO_TMP_MAX_AGE_SECONDS ≥ 10 × TARANTINO_LEASE_SECONDS`.
+- `TARANTINO_REQUEUE_SECONDS > TARANTINO_BATCH_TIMEOUT_SECONDS`.
+- `TARANTINO_CRASH_AT`, if set, is a §8 point of the service being started.
+- `TARANTINO_CANDIDATES=mirror` requires `TARANTINO_MIRROR`.
+- `TARANTINO_COORDINATION` is one of its four values in lower case, and `TARANTINO_SNAPSHOT_ON_PUBLISH` and `TARANTINO_ACTIVEMQ_PERSISTENT` are `true` or `false`. The variables of a mode the service does not run are still read and validated.
+
+`TARANTINO_DATALAKE_LAYOUT`, `TARANTINO_INDEX`, `TARANTINO_METADATA`, `TARANTINO_DATAMARTS` and `TARANTINO_CONTROL` are gone: there are no alternative structures or state files anymore.
+
+The scripts in `scripts/bench/` also read these. `TarantinoConfig` does not, because no service uses them:
+
+| Variable | Default | Used by | Purpose |
+| --- | --- | --- | --- |
+| `TARANTINO_REPETITIONS` | 5 | Every experiment with trials | Repetitions of each configuration (§9) |
+| `TARANTINO_REPLICAS_LIST` | `1 2 3` | `coordination-cost`, `resource-usage` | Replica counts of `crawler` and `indexer` together, space-separated |
+| `TARANTINO_PHASE_TIMEOUT_SECONDS` | 1800 | `coordination-cost`, `resource-usage` | Longest wait for a phase of a trial before the run gives up |
+
+The `bench` and `checks` jars read these, and nothing else does:
+
+| Variable | Default | Used by | Purpose |
+| --- | --- | --- | --- |
+| `TARANTINO_WARMUP_SECONDS` | 30 | `bench load` | Requests of each trial before the measurement, which are not recorded |
+| `TARANTINO_MEASUREMENT_SECONDS` | 120 | `bench load` | Measured part of each trial, whose requests go to `load/<trial>.csv.gz` |
+| `TARANTINO_FRONTEND_URL` | `http://localhost:8080` | `checks` | Front-end entry port (§6.1) |
+| `TARANTINO_OPERATIONAL_URL` | `http://localhost:8081` | `checks` | Operational entry port (§6.1) |
+
+`checks` also reads `TARANTINO_SNAPSHOT_SECONDS`, with its default, to wait for the snapshot refresh, and `bench explain` reads `TARANTINO_MONGO_URI`. `search-latency.sh` leaves `bench load` with its defaults.
+
+`scripts/fill_cache.sh`, which prepares the corpus once and runs no service, reads these:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `TARANTINO_CACHE_SOURCE` | `rsync` | How to copy the books: `rsync`, or `http`, one request per book, where port 873 is blocked |
+| `TARANTINO_RSYNC_SOURCE` | `rsync.ibiblio.org::gutenberg-epub` | rsync module of Project Gutenberg's generated collection |
+| `TARANTINO_CACHE_BOOKS` | 2800 | Books of the corpus, the first downloadable ones of `workload/book_ids.txt` |
+| `TARANTINO_CACHE_PARALLEL` | 16 | Downloads at once with `http` |
+| `TARANTINO_WORKLOAD` and `TARANTINO_BENCHMARKS` | `workload` and `benchmarks` | Where it reads `book_ids.txt` and writes `cache/` and `mirror/` |
+
+### 4.8 Transition logs
+
+Each service writes one line for every book or batch state change it achieves (§5.1), and `control` also writes one for every message it requeues, with equal `from` and `to`. The line is written by `TransitionLog`, in `common`, at INFO level and with these keys in this order; `-` marks what does not apply:
+
+```text
+transition entity=book id=1342 from=QUEUED to=DOWNLOADING batch_id=- generation=- enqueued_at=2026-10-21T10:05:00Z at=2026-10-21T10:05:02.481Z replica=3f2b8c1e9a4d
+```
+
+- `entity` is `book` or `batch`, and `id` is the `book_id` or the `batch_id`. In a batch line, `batch_id` is `-`.
+- `from` and `to` are states from §4.5; `from` is `-` when the document is created.
+- `enqueued_at` is the one from the `BookTask` when the transition comes from a message (claiming a download or a book for a batch); otherwise, `-`. When a batch drained several messages for the same book, it is the earliest of them.
+- `at` is `Instant.now()` when the write finishes, and `replica` is the container hostname.
+- It is only written when the conditional write matches. `bench` derives `coordination.csv` (§9) from these lines, searching from `transition`, because `slf4j-simple` puts its prefix in front.
+- After “Publish a batch”, the indexer and `control` (§5.3, step 3) mark a book `PUBLISHED` with the same write, so each book has one `INDEXING`→`PUBLISHED` line, from whichever matched. `bench` does not read it: a book is published at the `at` of its batch's `WRITING`→`PUBLISHED` line, the earliest one if there are several.
+- In mode `orchestrator`, a book that `control` dispatches again writes a transition line with equal `from` and `to`, like a requeue.
+
+`query` writes one `snapshot` line per batch it adds to its snapshot, right after setting the new reference; when the generation changes, every batch of the new one counts as added. It is written by `SnapshotLog`, in `common`, at INFO level:
+
+```text
+snapshot batch_id=6716f0c2a1b2c3d4e5f60718 generation=1 at=2026-10-21T10:06:00.250Z replica=7a1c2d3e4f5a
+```
+
+`bench` measures publication visibility from it: `at` minus the `at` of that batch's `to=PUBLISHED` line.
+
+## 5. Conditional writes and reconciliation
+
+### 5.1 Conditional writes
+
+Dates compared across processes use the Mongo server's time (`$$NOW`), never the process's, so changes are update pipelines. In the table, `L` is `TARANTINO_LEASE_SECONDS` in milliseconds, `R` is `TARANTINO_REQUEUE_SECONDS` in milliseconds, `M` is `TARANTINO_MAX_ATTEMPTS`, `C` is the lease UUID (a new one when claiming; in `control`, the `claim_id` it read), `B` is the `batch_id`, `w` is the write generation, `g` is `current.generation` and `t` is `rebuild.target_generation`.
+
+- Whoever fails its write does not retry: it leaves the work to whoever succeeded or to `control`.
+- When the next step depends on how the document ended up, use `findOneAndUpdate` with `ReturnDocument.AFTER`, never a separate `find`.
+- The ones marked *(common)* live in `common`; the rest, in the Mongo adapter of the service that performs them.
+- Each one has a test with two claimants at once, on Testcontainers MongoDB.
+- “Renew a book” and “Renew a batch” run on the lease heartbeat in `common`, on their own thread. A renewal that throws is retried on the next heartbeat; only one that does not match loses the lease. The worker checks whether its lease was lost before each write of its job and, if so, drops the job without writing anything else.
+
+| Operation | Who | Filter | Change | If it does not match |
+| --- | --- | --- | --- | --- |
+| Create the pointer *(common)* | All, at startup | `{_id: "current"}`, with upsert | `[{$set: {generation: {$ifNull: ["$generation", 1]}, switched_at: {$ifNull: ["$switched_at", "$$NOW"]}}}]` | It existed: no change |
+| Create the state *(common)* | `control` when seeding; `POST /ingest` | `{_id: id}`, with upsert | `[{$set: {status: {$ifNull: ["$status", "QUEUED"]}, attempts: {$ifNull: ["$attempts", 0]}, enqueued_at: {$ifNull: ["$enqueued_at", "$$NOW"]}, updated_at: {$ifNull: ["$updated_at", "$$NOW"]}}}]`; if `upsertedId` is not null, `BookTask` to `books-to-download` | It existed: not enqueued |
+| Retry a `FAILED` book | `POST /ingest` | `{_id: id, status: "FAILED"}` | `[{$set: {status: "QUEUED", attempts: 0, last_error: null, enqueued_at: "$$NOW", updated_at: "$$NOW"}}]`; then `BookTask` to `books-to-download` | No longer `FAILED`: its state is returned |
+| Claim a book | `crawler` | `{_id: id, status: "QUEUED"}` | `[{$set: {status: "DOWNLOADING", claim_id: C, lease_until: {$add: ["$$NOW", L]}, attempts: {$add: ["$attempts", 1]}, updated_at: "$$NOW"}}]` | Duplicate or stale message: dropped |
+| Renew a book | `crawler`, every `HEARTBEAT` | `{_id: id, status: "DOWNLOADING", claim_id: C}` | `[{$set: {lease_until: {$add: ["$$NOW", L]}}}]` | Lease lost: leaves the book without marking anything |
+| Finish a download | `crawler` | `{_id: id, status: "DOWNLOADING", claim_id: C}` | `[{$set: {status: "DOWNLOADED", downloaded_at: "$$NOW", enqueued_at: "$$NOW", updated_at: "$$NOW", last_error: null}}, {$unset: ["claim_id", "lease_until"]}]`; then `BookTask` to `books-to-index` | Does not enqueue: whoever claims it next will find it in the datalake |
+| Fail a download | `crawler` | `{_id: id, status: "DOWNLOADING", claim_id: C}`, with `findOneAndUpdate` | `[{$set: {status: {$cond: [{$and: [E, {$lt: ["$attempts", M]}]}, "QUEUED", "FAILED"]}, last_error: code, updated_at: "$$NOW"}}, {$set: {enqueued_at: {$cond: [{$eq: ["$status", "QUEUED"]}, "$$NOW", "$enqueued_at"]}}}, {$unset: ["claim_id", "lease_until"]}]`, with `E` = `true` for `NETWORK_ERROR` and `STORAGE_ERROR` and `false` for `NOT_FOUND` and `MISSING_MARKERS`; if it ends `QUEUED`, `BookTask` to `books-to-download` | Lease lost: nothing |
+| Release an expired download | `control` | `{_id: id, status: "DOWNLOADING", claim_id: C, $expr: {$lte: ["$lease_until", "$$NOW"]}}`, with `findOneAndUpdate` | `[{$set: {status: {$cond: [{$lt: ["$attempts", M]}, "QUEUED", "FAILED"]}, last_error: "LEASE_EXPIRED", updated_at: "$$NOW"}}, {$set: {enqueued_at: {$cond: [{$eq: ["$status", "QUEUED"]}, "$$NOW", "$enqueued_at"]}}}, {$unset: ["claim_id", "lease_until"]}]`; if it ends `QUEUED`, `BookTask` to `books-to-download` | The worker renewed or finished: nothing |
+| Requeue a lost message | `control`, with the queue empty | `{_id: id, status: S, $expr: {$lte: ["$enqueued_at", {$subtract: ["$$NOW", R]}]}}`, with `S` = `QUEUED` for `books-to-download` and `DOWNLOADED` for `books-to-index` | `[{$set: {enqueued_at: "$$NOW", updated_at: "$$NOW"}}]`; then `BookTask` to that queue | Someone moved or enqueued it: nothing |
+| Claim the next book, mode `polling` | `crawler` | `findOneAndUpdate({status: "QUEUED"})`, sorted `{enqueued_at: 1, _id: 1}`, with `ReturnDocument.AFTER` | The same pipeline as “Claim a book”; the transition line carries the returned `enqueued_at` | Nothing waits: the worker sleeps `TARANTINO_POLL_MILLIS` |
+| Open a batch | `indexer` | `{_id: B}` in `batches_g<w>`, with upsert | `[{$set: {status: "WRITING", claim_id: C, owner: host, lease_until: {$add: ["$$NOW", L]}, book_ids: [], opened_at: "$$NOW"}}]` | Cannot happen: `B` is new |
+| Claim its books | `indexer` | `updateMany` with `{_id: {$in: ids}, status: "DOWNLOADED"}` | `[{$set: {status: "INDEXING", batch_id: B, generation: w, updated_at: "$$NOW"}}]`; then `find({batch_id: B, status: "INDEXING"})` gives the batch's books | The others are ignored; if none is left, it stops renewing the batch and `control` abandons it when it expires |
+| Claim the next book for a batch, mode `polling` | `indexer` | `findOneAndUpdate({status: "DOWNLOADED"})`, sorted `{enqueued_at: 1, _id: 1}`, with `ReturnDocument.AFTER` | The same pipeline as “Claim its books”, for one book; the transition line carries the returned `enqueued_at` | Nothing waits: the batch closes or the worker sleeps |
+| Renew a batch | `indexer`, every `HEARTBEAT` | `{_id: B, status: "WRITING", claim_id: C}` | `[{$set: {lease_until: {$add: ["$$NOW", L]}}}]` | Lease lost: stops writing |
+| Fail at indexing | `indexer` | `{_id: id, status: "INDEXING", batch_id: B}` | `[{$set: {status: "FAILED", last_error: "NOT_IN_DATALAKE", updated_at: "$$NOW"}}, {$unset: "batch_id"}]`, keeping `generation`; the book leaves the batch, and if none is left the batch is not published, as in “Claim its books” | No longer in this batch: nothing |
+| Publish a batch | `indexer` | `{_id: B, status: "WRITING", claim_id: C, $expr: {$gt: ["$lease_until", "$$NOW"]}}`, with `findOneAndUpdate` | `[{$set: {status: "PUBLISHED", published_at: "$$NOW", book_ids: books}}, {$unset: "lease_until"}]`, with `books` never empty; then, for each book of `books`, “Complete a publication” with `B`, whose line it only writes if the write matched, and `BatchPublished` from the document it returns (§4.2) | Lease lost: neither marks books nor notifies |
+| Abandon a batch | `control` | `{_id: B, status: "WRITING", $expr: {$lte: ["$lease_until", "$$NOW"]}}` | `[{$set: {status: "ABANDONED", abandoned_at: "$$NOW"}}, {$unset: "lease_until"}]` | It was published or renewed: untouched |
+| Release its books | `control` | `{_id: id, status: "INDEXING", batch_id: B}`, with `B` `ABANDONED` or without a document | `[{$set: {status: "DOWNLOADED", enqueued_at: "$$NOW", updated_at: "$$NOW"}}, {$unset: "batch_id"}]`, keeping `generation`; then `BookTask` to `books-to-index` | Someone changed it first: nothing |
+| Complete a publication *(common)* | `indexer`, after “Publish a batch”; `control`, in step 3 of §5.3 | `{_id: id, status: "INDEXING", batch_id: B}`, with `B` `PUBLISHED` | `[{$set: {status: "PUBLISHED", published_at: "$$NOW", updated_at: "$$NOW"}}]` | Already done |
+| Reindex into another generation | `control` | `{_id: id, status: "PUBLISHED", generation: {$lt: w}}` | `[{$set: {status: "DOWNLOADED", enqueued_at: "$$NOW", updated_at: "$$NOW"}}, {$unset: "batch_id"}]`, keeping `generation`; then `BookTask` to `books-to-index` | Already reindexed: nothing |
+| Open a rebuild | `POST /index/rebuild` | `{_id: "rebuild", status: {$ne: "RUNNING"}}`, with upsert and `findOneAndUpdate` with `ReturnDocument.AFTER` | `[{$set: {target_generation: {$add: [{$ifNull: ["$target_generation", g]}, 1]}, status: "RUNNING", requested_at: "$$NOW", switched_at: null}}]` | One is already running: the upsert fails with code 11000 and the existing one is returned (§5.4) |
+| Switch generation | `control` | `{_id: "current", generation: t - 1}` | `[{$set: {generation: t, switched_at: "$$NOW"}}]` | Someone already switched it |
+| Finish the rebuild | `control` | `{_id: "rebuild", status: "RUNNING", target_generation: t}` | `[{$set: {status: "DONE", switched_at: "$$NOW"}}]` | Already finished |
+
+### 5.2 Why a book never ends up in two published batches
+
+Only a `DOWNLOADED` book can be claimed. An `INDEXING` book only goes back to `DOWNLOADED` once `control` has abandoned its batch, and an `ABANDONED` batch cannot be published, because publishing requires `WRITING`. So each book is in at most one live batch and, therefore, in a single published batch per generation. Even so, `query` deduplicates by `book_id` when reading postings and logs an error if it finds a repeat.
+
+### 5.3 What `control` does
+
+**At startup**, after “Create the pointer” and ensuring its indexes, it seeds: it reads the candidates from `TARANTINO_CANDIDATES`, applies “Create the state” to each one and enqueues only the ones it created, without calling `crawler` or `indexer`. Then it reconciles for the first time.
+
+**Reconciliation**, every `TARANTINO_RECONCILE_SECONDS` and in this order. Each step is idempotent, and every write of `control` that enqueues, seeding included, sends its `BookTask` right after it: a `control` crash halfway leaves at most books in their new state without their message, which step 4 requeues.
+
+1. Expired downloads: find `{status: "DOWNLOADING", $expr: {$lte: ["$lease_until", "$$NOW"]}}` and apply “Release an expired download” to each.
+2. Expired batches: in every `batches_g<k>` that exists, find the `WRITING` ones whose `lease_until` has passed and apply “Abandon a batch” to each. All generations are checked so that an old batch does not wait for its generation's `drop`.
+3. `INDEXING` books: look up each one's batch in `batches_g<book's generation>`. If it is `WRITING`, leave it; if it is `ABANDONED` or missing, “Release its books”; if it is `PUBLISHED`, “Complete a publication”.
+4. Lost messages: if `books-to-download` is empty, apply “Requeue a lost message” to the `QUEUED` books whose `enqueued_at` is older than `$$NOW − R`; if `books-to-index` is empty, do the same with the `DOWNLOADED` books. This also rebuilds the queues if Hazelcast restarts. That is why `REQUEUE > BATCH_TIMEOUT`: an indexer holds the messages of its batch for up to `BATCH_TIMEOUT` before claiming them. Step 4 only runs in modes with a broker; in mode `orchestrator`, dispatching again (§11.4) replaces it.
+5. Abandoned batches: for each `ABANDONED` batch whose `abandoned_at` is older than `$$NOW − TARANTINO_GC_SECONDS`, delete its postings (`deleteMany({batch_id: B})` in `postings_g<k>`). The batch stays `ABANDONED` until its generation is dropped, so this step repeats on every reconciliation and also deletes the postings that a zombie indexer (§8) writes after the first deletion. Metadata is not deleted: it is per book, it is overwritten when the book is published in another batch and `query` only reads the metadata of its snapshot.
+6. Generations:
+   1. Apply “Reindex into another generation” to every `PUBLISHED` book with `generation < w`, where `w` is the target if a rebuild is `RUNNING` and `current.generation` otherwise. Outside a rebuild, it only finds books from an indexer that read the generation right before a switch.
+   2. With a `RUNNING` rebuild targeting `t`: if `current.generation` is `t − 1` and the condition in step 4 of §5.4 holds, apply “Switch generation” and then “Finish the rebuild”. If `current.generation` is already `t` because `control` crashed between the two, only “Finish the rebuild”.
+   3. If `current.switched_at` is older than `$$NOW − TARANTINO_GC_SECONDS`, `drop` the collections `metadata_g<k>`, `postings_g<k>` and `batches_g<k>` of every generation `k < current.generation`.
+
+**Datalake cleanup**, every `TARANTINO_CLEANUP_SECONDS`: delete the `.tmp` files whose `mtime` is older than `TARANTINO_TMP_MAX_AGE_SECONDS`, compared with the container clock, which is the host's. Never delete headers or bodies.
+
+### 5.4 Rebuild
+
+A generation pointer is used, not `renameCollection`: renaming three collections is not atomic, and between one rename and the next `query` would see postings from one generation with batches from another. Switching the pointer is a single write.
+
+1. `POST /index/rebuild` reads `g = current.generation` and applies “Open a rebuild”, which targets the generation after the last rebuild's `target_generation`, or after `g` if there never was a rebuild. A rebuild only finishes once the pointer is at its target, so both are `g + 1`; taking the old target inside the same write keeps a switch that lands between the read and the write from opening a rebuild of the generation already served. The answer's `generation` is the new target minus one. If one is already running, the filter `{_id: "rebuild", status: {$ne: "RUNNING"}}` does not match and MongoDB tries to insert another document with the same `_id`, which fails with code 11000 (Duplicate Key). The driver throws a `MongoWriteException` with `updateOne` and a `MongoCommandException` with `findOneAndUpdate`, and both extend `MongoServerException`. The service catches `MongoServerException` and, if `getCode() == 11000`, reads the existing document in `index_state` and answers `202` with its current state instead of failing; with any other code, the exception propagates.
+2. The write generation is `target_generation` while a rebuild is `RUNNING`, and `current.generation` otherwise. Each indexer reads it before opening each batch and ensures that generation's indexes before its first write to it.
+3. On every reconciliation, `control` sends back to `DOWNLOADED`, and enqueues, every `PUBLISHED` book with `generation < target_generation`, including those that an old batch that was already open publishes late.
+4. When no book is left with `generation < target_generation` except the `FAILED` ones, and no book with `generation == target_generation` is in state `DOWNLOADED` or `INDEXING`, `control` switches the pointer with “Switch generation” and marks the rebuild with “Finish the rebuild”. Books without `generation` (never indexed) do not count. The books that block the switch are those matching `{$or: [{generation: {$lt: t}, status: {$ne: "FAILED"}}, {generation: t, status: {$in: ["DOWNLOADED", "INDEXING"]}}]}`; that filter lives in `common` and both `control` and `books_pending` (§6.5) use it.
+5. `query` sees the new generation on its next refresh and swaps its whole snapshot. While the rebuild runs it keeps serving the old generation, and new books are not visible until the switch.
+6. Once `TARANTINO_GC_SECONDS` have passed since `current.switched_at`, `control` `drop`s the collections of the old generations.
+
+## 6. HTTP API
+
+`api/openapi.yaml` is derived from this section and its `info.version` follows this file's version. If the two disagree, the OpenAPI gets fixed.
+
+### 6.1 Entry ports and endpoints
+
+nginx has two entry ports. 8080 is only for the front-end and routes `/search`, `/search/filters` and `/books/` to the `query` replicas; any other path gives `404`. 8081 is for operations and routes `/ingest/` to `crawler`, `/index/` to `indexer` and `/control/` to `control`, without rewriting paths. nginx must spread requests across all replicas even when their number changes: with `resolver 127.0.0.11 valid=5s` and the address in a variable, or by restarting it after each `--scale`. When a replica does not answer, nginx tries another one, with `proxy_next_upstream error timeout` and `proxy_connect_timeout 1s`.
+
+In mode `hazelcast` there are no internal endpoints between services: that coordination goes through Hazelcast (§4.2), which is documented separately. The fourth inventory, “Internal”, only exists in mode `orchestrator` (§11.4), behind nginx's internal port 8082, which is not published to the host; in every other mode those routes do not exist and the service behind nginx answers `404` without `code` (§6.6).
+
+| Inventory | Service (port) | nginx port | Method and path | Consumer | Responses |
+| --- | --- | --- | --- | --- | --- |
+| Front-end | `query` (7003) | 8080 | `GET /search` | Front-end | `200`, `400`, `503` |
+| Front-end | `query` (7003) | 8080 | `GET /books/{book_id}` | Front-end | `200`, `400`, `404`, `503` |
+| Front-end | `query` (7003) | 8080 | `GET /search/filters` | Front-end | `200`, `503` |
+| Operational | `crawler` (7001) | 8081 | `POST /ingest/{book_id}` | Load and admin scripts | `202`, `200`, `400`, `503` |
+| Operational | `crawler` (7001) | 8081 | `GET /ingest/status/{book_id}` | Whoever got a `202`; checks | `200`, `400`, `404`, `503` |
+| Operational | `crawler` (7001) | 8081 | `GET /ingest/list` | Checks | `200`, `503` |
+| Operational | `indexer` (7002) | 8081 | `POST /index/update/{book_id}` | Admin | `202`, `200`, `400`, `404`, `409`, `503` |
+| Operational | `indexer` (7002) | 8081 | `GET /index/status/{book_id}` | Whoever got a `202` | `200`, `400`, `404`, `503` |
+| Operational | `indexer` (7002) | 8081 | `POST /index/rebuild` | Admin | `202`, `503` |
+| Operational | `indexer` (7002) | 8081 | `GET /index/status` | Admin and benchmarks | `200`, `503` |
+| Operational | `control` (7004) | 8081 | `GET /control/status` | Admin and benchmarks | `200`, `503` |
+| Health | All, on their own port | None | `GET /health` | Compose healthchecks | `200`, `503` |
+| Internal, mode `orchestrator` | `crawler` (7001) | 8082 | `POST /internal/download` | `control` | `202`, `400`, `503` |
+| Internal, mode `orchestrator` | `indexer` (7002) | 8082 | `POST /internal/index` | `control` | `202`, `400`, `503` |
+| Internal, mode `orchestrator` | `query` (7003), each replica | None | `POST /internal/snapshot/refresh` | `control` | `202` |
+
+Besides the responses in the table, every endpoint answers `500` to an unexpected exception, as §6.6 says.
+
+### 6.2 Book state
+
+`GET /ingest/status/{book_id}` and `GET /index/status/{book_id}` return the same thing, read from `book_states`, and it is also the body of every `200` and every `202` from `POST /ingest/{book_id}` and `POST /index/update/{book_id}`:
+
+```json
+{"book_id": 1342, "status": "INDEXING", "attempts": 1, "last_error": null, "updated_at": "2026-10-21T10:05:00Z"}
+```
+
+An id that is not a positive integer that fits in an Int32 (`^[1-9][0-9]*$`, at most 2147483647) gives `400` (`INVALID_PARAMETER`, `parameter: "book_id"`), and on the `GET`s a book without a document gives `404`. Every `{book_id}` route, including `GET /books/{book_id}`, uses the parser in `common`. Every `202` carries a `Location` pointing to the book's state: `/ingest/status/{book_id}` from `/ingest` and `/index/status/{book_id}` from `/index/update`. `200` responses carry no `Location`.
+
+| Request and book state | Response |
+| --- | --- |
+| `POST /ingest`, no document | “Create the state” and enqueue: `202` with the state (`QUEUED`) |
+| `POST /ingest`, in `FAILED` | “Retry a `FAILED` book”: `202` with the state (`QUEUED`, `attempts` back to 0) |
+| `POST /ingest`, in `QUEUED` or `DOWNLOADING` | `202` with its state, without enqueuing it again |
+| `POST /ingest`, in `DOWNLOADED`, `INDEXING` or `PUBLISHED` | `200` with its state |
+| `POST /index/update`, no document | `404` (`BOOK_NOT_FOUND`) |
+| `POST /index/update`, in `QUEUED`, `DOWNLOADING` or `FAILED` | `409` (`NOT_DOWNLOADED`); for a `FAILED` book, the way forward is `POST /ingest` |
+| `POST /index/update`, in `DOWNLOADED` | `202` with its state, and a `BookTask` to `books-to-index`: a duplicate does no harm |
+| `POST /index/update`, in `INDEXING` | `202` with its state, without enqueuing |
+| `POST /index/update`, in `PUBLISHED` | `200` with its state |
+
+`POST /ingest/{book_id}` follows this order: “Create the state”; if it already existed, “Retry a `FAILED` book”; if that does not match either, it reads the state and answers according to the table. If Hazelcast fails after writing to Mongo, it answers `503`: the book stays `QUEUED` and `control` enqueues it (§5.3).
+
+### 6.3 `GET /search`
+
+`GET /search?q={terms}&author={name}&language={code}&year={YYYY}&offset={n}&limit={n}`. With filters, the ids come from the `metadata_g<n>` indexes and are intersected with the postings; without filters, only the metadata of the page is read.
+
+| Parameter | Rule |
+| --- | --- |
+| `q` | Required. It is tokenized with the `common` tokenizer, the same one used for indexing, and books must contain every word. If missing or blank, `400` (`MISSING_PARAMETER`); if it only has stopwords or no words, `200` with no results. |
+| `author` | Every author word, with the same tokenizer, must be in `author_terms`: `austen` finds “Jane Austen”. If no word is left, `400`. |
+| `language` | Two-letter lowercase ISO 639-1 code (`^[a-z]{2}$`); a book with several languages matches any of them. Malformed, `400`; no books, empty `200`. |
+| `year` | Four digits (`^[0-9]{4}$`), equal to the Gutenberg publication year (`year`). Malformed, `400`. |
+| `offset`, `limit` | Integers; `0` and `20` by default, `offset ≥ 0` and `limit` from 1 to 100. Out of range or non-numeric, `400`. |
+| Order | Descending TF-IDF, summing `(1 + ln tf) × ln(N / df)` per word; ties broken by ascending `book_id` (§7). |
+| `total` | Matches with the filters applied, not just those on the page. |
+
+An optional parameter that is empty or only whitespace (`author=`) counts as absent; any other value must follow its rule exactly as received, without trimming. The parameters are checked in the table's order, `q`, `author`, `language`, `year`, `offset` and `limit`: the first one that fails gives the `400`, naming it in `parameter`, and the search only runs once all of them are valid. So `q` with only stopwords and an `author` with no words gives `400`, not an empty `200`.
+
+```json
+{
+  "query": "pride prejudice",
+  "filters": {"author": "austen", "language": "en"},
+  "total": 1,
+  "offset": 0,
+  "limit": 20,
+  "results": [
+    {"book_id": 1342, "title": "Pride and Prejudice", "author": "Jane Austen", "language": "en", "year": 1998}
+  ]
+}
+```
+
+- `query` is `q` as received, and `filters` the filters present as received, with `year` as a number; without filters, `{}`.
+- `offset` and `limit` are the ones applied, including when they are the defaults.
+- Each result carries `book_id`, `title`, `author`, `language` and `year`, never the datalake path. `language` is the first code in `languages`, or `null`.
+
+### 6.4 Books and filters
+
+**`GET /books/{book_id}`.** `200` if the book is in a published batch of the snapshot, `404` (`BOOK_NOT_FOUND`) otherwise, `400` if the id is not a positive integer and `503` without a snapshot. It carries the fields of a search result plus `languages` and `original_year`.
+
+```json
+{"book_id": 1342, "title": "Pride and Prejudice", "author": "Jane Austen", "language": "en", "languages": ["en"], "year": 1998, "original_year": null}
+```
+
+**`GET /search/filters`.** It takes no parameters, so it answers `200` or `503`. It is computed once per snapshot and only with the snapshot's books. `languages` goes from most to fewest books, with the name from the `common` language table; `total_books` is `N`. With no books, `languages` is `[]` and `min` and `max` are `null`.
+
+```json
+{"languages": [{"code": "en", "name": "English", "books": 2380}, {"code": "fr", "name": "French", "books": 95}], "years": {"min": 1971, "max": 2026}, "total_books": 2800}
+```
+
+### 6.5 Operational endpoints
+
+| Request | Response |
+| --- | --- |
+| `GET /ingest/list` | `{"count": 3, "books": [5, 17, 1342]}`: books in `DOWNLOADED`, `INDEXING` or `PUBLISHED`, ascending |
+| `POST /index/rebuild` | `202` with `{"generation": 1, "target_generation": 2, "status": "RUNNING"}` and `Location: /index/status`; if one is already running, `202` with the existing one |
+| `GET /index/status` | `{"generation": 1, "books_indexed": 2800, "batches_published": 28, "last_update": "2026-10-21T10:06:00Z", "index_size_mb": 512.4, "rebuild": null}` |
+| `GET /control/status` | `{"generation": 1, "books": {"QUEUED": 10, "DOWNLOADING": 8, "DOWNLOADED": 0, "INDEXING": 100, "PUBLISHED": 2680, "FAILED": 2}, "queues": {"books-to-download": 10, "books-to-index": 0}, "last_reconciliation": "2026-10-21T10:06:30Z"}` |
+| `GET /health` | `200` with `{"status": "UP"}`; `503` with `Retry-After: 5` and `{"status": "DOWN", "down": ["mongo"]}` |
+
+`GET /index/status` fields, all for the current generation:
+
+- `books_indexed`: books in its `PUBLISHED` batches, the sum of their `book_ids`; it is what `query` can find.
+- `batches_published`: its `PUBLISHED` batches.
+- `last_update`: `published_at` of its last published batch, or `null`.
+- `index_size_mb`: `storageSize` plus `totalIndexSize` of its three collections, from `$collStats`, in MiB with one decimal. A collection that does not exist yet counts 0.
+- `rebuild`: `null` if no rebuild is `RUNNING`; if one is, `{"target_generation": 2, "status": "RUNNING", "books_pending": 1200}`, where `books_pending` counts the books matching the filter in step 4 of §5.4.
+
+In `GET /control/status`, `books` always carries all six states, `queues` the size of both queues and `last_reconciliation` when the last reconciliation finished, or `null`.
+
+In `GET /health`, `down` can hold `mongo`, the broker of the mode, `hazelcast` or `activemq`, and, in `query`, `snapshot` while there is no snapshot. In modes `polling` and `orchestrator` there is no broker to list. It is not an API error: it is sent as `application/json`, not as Problem Details.
+
+### 6.6 Errors
+
+Problem Details (RFC 9457), with `Content-Type: application/problem+json`, in all four services and through the `common` handler. `code` is one of those in §4.5; `parameter` only appears in `400` responses, and every `503` carries `Retry-After: 5`. An unexpected exception gives `500` in the same format, without `code`.
+
+nginx's own errors use the same format. An unknown path on 8080 or 8081 gives `404` without `code`, and so does a path or method a service lacks under a prefix nginx routes to it, such as `GET /books/` or `DELETE /ingest/1342`, which the service answers itself. When no replica of the service answers (`502` or `504` from the upstream), nginx answers `503` with `code: "DEPENDENCY_UNAVAILABLE"` and `Retry-After: 5`.
+
+```json
+{"type": "about:blank", "title": "Bad Request", "status": 400, "code": "INVALID_PARAMETER", "parameter": "limit", "detail": "limit must be between 1 and 100"}
+```
+
+### 6.7 Asynchrony, retries and CORS
+
+- Whatever changes state answers `202` and is checked later at its `Location`, or `200` if it was already done. An accepted book has finished when its state is `PUBLISHED`, and has failed when it is `FAILED`, with the reason in `last_error`.
+- Outside a rebuild, a book shows up in `/search` when each `query` replica refreshes after its batch is published: at once on `BatchPublished`, and at most `TARANTINO_SNAPSHOT_SECONDS` later if the message is lost. Its state is not in step with that: it can read `INDEXING` while the book is already searchable, until the indexer marks it or, after a crash, `control` completes the publication (§8), and it can read `PUBLISHED` up to `TARANTINO_SNAPSHOT_SECONDS` before a replica shows it. So a client, and the checks, wait for `PUBLISHED` at the `Location` and then give `/search` up to `TARANTINO_SNAPSHOT_SECONDS`. During a rebuild, new books wait for the switch (§5.4).
+- Handlers never wait for long jobs: they answer in milliseconds. If MongoDB does not answer, its clients give up selecting a server after 2 s and the handler answers `503`, so a client can use a 5 s timeout and, on a `503`, retry after `Retry-After`.
+- Repeating a `POST` duplicates nothing: state lives in Mongo and every transition is conditional.
+- `query` allows CORS from `TARANTINO_CORS_ORIGIN`; nginx adds no headers.
+
+## 7. Search in `query`
+
+**The snapshot.** It is immutable and refreshed by a single thread, at startup, on each `BatchPublished` and every `TARANTINO_SNAPSHOT_SECONDS`; requests only read the reference held in an `AtomicReference`. The topic listener does not refresh: it asks that thread for a refresh.
+
+1. Read `current.generation`. If it changed, load every `PUBLISHED` batch of `batches_g<n>` for the new generation.
+2. If it did not change, ask for the `_id` of the `PUBLISHED` batches and load `book_ids` only for the ones it did not have. Compare by `_id`, never by `published_at`: two simultaneous publications can write their dates out of order.
+3. Build a new snapshot with `generation`, `batch_ids`, the set of `book_ids`, `N = book_ids.size()` and the `GET /search/filters` summary. When adding batches it is enough to read the languages and year of the new books; when the generation changes, it is recomputed in full.
+4. Until it has its first snapshot, `query` answers `503` on its three routes.
+
+**A `GET /search` request.** It starts by validating the parameters in the order of §6.3.
+
+1. Read the snapshot once and use it for the whole request. `N` comes from it, never from `countDocuments`.
+2. Get the terms of `q` with the `common` tokenizer, without repeats. If none is left, or `N` is 0, answer `200` with `total: 0`.
+3. With filters, ask `metadata_g<n>` for the `_id`s matching `{author_terms: {$all: words}, languages: code, year: year}`, with only the filters present, and keep those in the snapshot. If none is left, `total: 0`.
+4. Read `postings_g<n>` with `{term: {$in: terms}, batch_id: {$in: snapshot.batch_ids}}`.
+5. Group in Java a `Map<String, Map<Integer, Integer>>` from term to book and `tf`. A book repeated within a term counts once and an error is logged, so `df(t)` is always the number of distinct books.
+6. If any term has no books, `total: 0`. Otherwise, intersect starting with the term with the fewest books and, with filters, also with the `_id`s from step 3.
+7. Score each book with the sum of `(1 + ln tf) × ln(N / df)` and sort by descending score and ascending `book_id`. `total` is the size of the intersection.
+8. Cut the page `[offset, offset + limit)` and read its metadata with a single query `{_id: {$in: page}}`, answering in page order.
+
+In Java, step 7 is `score += (1 + Math.log(tf)) * Math.log((double) N / df)` for each term.
+
+## 8. Failure matrix
+
+Each row is an F3 test with its script in `scripts/recovery/<nn>-<row>.sh` (Recovery scripts, below). The script brings the stack up, causes the crash as the last column says, restarts what went down without `TARANTINO_CRASH_AT` and checks that the book ends `PUBLISHED`, that `/search` finds it exactly once after `query` refreshes (§6.7) and that no book is in two published batches of the current generation. It leaves its run in `benchmarks/runs/<run_id>/`, with the recovery time.
+
+| What goes down | What is left | Who notices | How it recovers | How to cause it |
+| --- | --- | --- | --- | --- |
+| `crawler` while downloading | `DOWNLOADING` book with a lease | `control`, when it expires | Back to `QUEUED` and to the queue | `after-claim` in `crawler` |
+| `crawler` after writing to the datalake and before `DOWNLOADED` | The book in the datalake, still `DOWNLOADING` | `control`, when it expires | Back to `QUEUED`; whoever claims it finds it in the datalake and does not download it | `after-datalake-write` in `crawler` |
+| `crawler` after `DOWNLOADED` and before enqueuing | `DOWNLOADED` book without a message | `control`: empty queue and old `enqueued_at` | Enqueued again | `after-downloaded` in `crawler` |
+| `crawler` or `indexer` after taking messages from the queue and before claiming them | `QUEUED` or `DOWNLOADED` books without a message: an `IQueue` has no acknowledgements | `control`: empty queue and old `enqueued_at` | Enqueued again; that is why `REQUEUE` is greater than `BATCH_TIMEOUT` | `after-dequeue` in `crawler` or in `indexer` |
+| `indexer` while writing a batch | `WRITING` batch, `INDEXING` books, half-written postings | `control`, when the batch expires | `ABANDONED`; its books go back to `DOWNLOADED` and to the queue, and its postings are deleted after `GC` | `during-batch-write` in `indexer` |
+| `indexer` after publishing and before marking the books | `PUBLISHED` batch, `INDEXING` books | `control` | Completes the publication | `after-publish` in `indexer` |
+| `indexer` after marking the books and before notifying | `PUBLISHED` batch without `BatchPublished` | `query`, on its refresh | Sees it within `TARANTINO_SNAPSHOT_SECONDS` | `after-mark` in `indexer` |
+| `crawler` stopped longer than its lease | A zombie worker that may still write the book to the datalake | `control`, when the lease expires | Back to `QUEUED` and to the queue; the zombie's renewal, “Finish a download” and “Fail a download” fail on `claim_id`, and its atomic rename only replaces the files with another complete copy of the book | `docker pause` for more than `TARANTINO_LEASE_SECONDS` and `docker unpause` |
+| `indexer` stopped longer than its lease | A zombie indexer that keeps writing | Its renewal fails | It stops writing at its next renewal; its conditional publish fails and `control` deletes its postings, also those it writes late (§5.3) | `docker pause` for more than `TARANTINO_LEASE_SECONDS` and `docker unpause` |
+| `control` | At most books in their new state without their `BookTask`, if it died between a write and its enqueue | Its own reconciliation, once it is back: empty queue and old `enqueued_at` | It reconciles from Mongo and requeues those books (§5.3) | `docker kill` and `docker start` |
+| Hazelcast | Empty queues | `control`: empty queue and old `enqueued_at` | Requeues the `QUEUED` and `DOWNLOADED` books | `docker restart` |
+| MongoDB | No half-done transition: each one is a single write | Healthchecks; services answer `503` | When it comes back, everything continues from the last state | `docker stop` and `docker start` |
+| A `query` replica | Nothing: it does not write | nginx stops sending it requests | The others serve; at startup, it rebuilds its snapshot | `docker kill` of that replica |
+
+**`TARANTINO_CRASH_AT`.** The first time the service reaches the named point, it stops with `Runtime.getRuntime().halt(1)`, without hooks or `finally`. The points are in `CrashPoints`, in `common`.
+
+| Point | Service | Where it stops |
+| --- | --- | --- |
+| `after-dequeue` | `crawler` | After taking a message from `books-to-download` and before “Claim a book” |
+| `after-claim` | `crawler` | After “Claim a book” and before downloading |
+| `after-datalake-write` | `crawler` | After renaming the header and the body and before “Finish a download” |
+| `after-downloaded` | `crawler` | After “Finish a download” and before enqueuing in `books-to-index` |
+| `after-dequeue` | `indexer` | After taking the batch's messages and before “Open a batch” |
+| `during-batch-write` | `indexer` | After the metadata `bulkWrite` and the first postings `bulkWrite`, and before “Publish a batch” |
+| `after-publish` | `indexer` | After “Publish a batch” and before marking its books |
+| `after-mark` | `indexer` | After marking its books `PUBLISHED` and before sending `BatchPublished` |
+
+**Between two points.** A crash between two points is recovered like a row of the matrix, so it has no point of its own:
+
+- `crawler`, halfway through a datalake write: as `after-claim`, plus an orphan `.tmp` that the cleanup deletes once it is older than `TARANTINO_TMP_MAX_AGE_SECONDS`.
+- `crawler`, after “Fail a download” leaves the book `QUEUED` and before enqueuing it, or `POST /ingest` between its write and its enqueue: as `after-dequeue`.
+- `indexer`, after “Open a batch” and before “Claim its books”: as `after-dequeue`, plus an empty batch that `control` abandons with no books to release.
+- `indexer`, after “Claim its books” and before the first postings `bulkWrite`: as `during-batch-write`.
+
+If Mongo or Hazelcast fail halfway through a job outside these tests, the service does the same as after a crash: it drops the job without marking anything, the leases expire and `control` redoes it. A JVM that runs out of memory exits (§2.4), and so does a service whose worker thread or periodic task dies, so both recover like a crash at that point.
+
+**Recovery scripts.** There are 14, one per row and service: the `after-dequeue` row is split into `crawler` and `indexer`. Scripts 09 to 12 seed `TARANTINO_CANDIDATES=mirror`, so there is work in flight when the failure arrives; the rest seed `sample_ids.txt`.
+
+| Script | Row | Seeds | Failure |
+| --- | --- | --- | --- |
+| `01-crawler-after-claim.sh` | `crawler` while downloading | `sample_ids.txt` | `CRAWLER_CRASH_AT=after-claim` |
+| `02-crawler-after-datalake-write.sh` | `crawler` after writing to the datalake | `sample_ids.txt` | `CRAWLER_CRASH_AT=after-datalake-write` |
+| `03-crawler-after-downloaded.sh` | `crawler` after `DOWNLOADED` and before enqueuing | `sample_ids.txt` | `CRAWLER_CRASH_AT=after-downloaded` |
+| `04-crawler-after-dequeue.sh` | `crawler` after taking messages from the queue | `sample_ids.txt` | `CRAWLER_CRASH_AT=after-dequeue` |
+| `05-indexer-after-dequeue.sh` | `indexer` after taking messages from the queue | `sample_ids.txt` | `INDEXER_CRASH_AT=after-dequeue` |
+| `06-indexer-during-batch-write.sh` | `indexer` while writing a batch | `sample_ids.txt` | `INDEXER_CRASH_AT=during-batch-write` |
+| `07-indexer-after-publish.sh` | `indexer` after publishing and before marking the books | `sample_ids.txt` | `INDEXER_CRASH_AT=after-publish` |
+| `08-indexer-after-mark.sh` | `indexer` after marking the books and before notifying | `sample_ids.txt` | `INDEXER_CRASH_AT=after-mark` |
+| `09-crawler-paused.sh` | `crawler` stopped longer than its lease | `mirror` | After `bench wait DOWNLOADING`, `docker compose pause crawler` for 10 s, then `unpause` |
+| `10-indexer-paused.sh` | `indexer` stopped longer than its lease | `mirror` | After `bench wait INDEXING`, `docker compose pause indexer` for 10 s, then `unpause` |
+| `11-control-killed.sh` | `control` | `mirror` | `docker compose kill control` once `bench wait QUEUED` returns, while it seeds, then `docker compose start control` |
+| `12-broker-restarted.sh` | The broker of the mode (§11) | `mirror` | After `bench wait books-to-download`, `docker compose restart hazelcast`, or `activemq` in both `activemq` modes |
+| `13-mongo-stopped.sh` | MongoDB | `sample_ids.txt` | `docker compose stop mongo` as soon as `docker compose up -d` returns, then `start` 10 s later |
+| `14-query-replica-killed.sh` | A `query` replica | `sample_ids.txt` | `docker kill` of one replica while `bench` queries `/search` |
+
+- Each script starts with `docker compose down -v` and brings the stack up with `docker-compose.mirror.yml`, `--env-file scripts/recovery/recovery.env` and `--scale crawler=N --scale indexer=N --scale query=N`. It causes the failure in its line of the table. At a crash point it waits for the container to exit with code 1, for at most 120 s or the run fails, and brings it back without the variable (§2.4). It ends with `docker compose run --rm bench recovery <nn> <run_id> <failed_at>`, where `failed_at` is the instant of the failure: the container's exit or the Docker command.
+- `scripts/recovery/recovery.env` shortens the timing and keeps the §4.7 invariants: `TARANTINO_LEASE_SECONDS=6`, `TARANTINO_HEARTBEAT_SECONDS=2`, `TARANTINO_RECONCILE_SECONDS=3`, `TARANTINO_BATCH_TIMEOUT_SECONDS=5`, `TARANTINO_REQUEUE_SECONDS=10`, `TARANTINO_GC_SECONDS=60`, `TARANTINO_TMP_MAX_AGE_SECONDS=60`, `TARANTINO_SNAPSHOT_SECONDS=2` and `TARANTINO_INDEX_BATCH=5`.
+- Waiting for a moment is Java, not shell: `bench wait QUEUED`, `bench wait DOWNLOADING`, `bench wait INDEXING` and `bench wait books-to-download` return as soon as `GET /control/status` shows that state or that queue above 0.
+- `bench recovery` polls `GET /control/status` every second until every seeded book is `PUBLISHED`. Then it checks that `GET /books/{book_id}` answers `200` for each one, that `/search` with the words of its title that its text contains and `limit=100` returns it exactly once, because only the text is indexed (§7) and some titles use words their text never does, and that no `book_id` is in two `PUBLISHED` batches of the current generation. In script 10 it also checks, once `TARANTINO_GC_SECONDS` have passed, that no posting of an `ABANDONED` batch is left. If a check fails, it polls again.
+- Script 14 launches `bench recovery 14` in the background and kills one `query` replica 20 s later. Once every book is `PUBLISHED`, `bench` queries `/search` every 100 ms for 60 s and fails on any status other than `200`.
+- The recovery time goes from `failed_at` to the end of the first pass that starts after `failed_at` and where every check holds, so the planned failure of script 14 never gives a negative time. `summary.csv` holds it as `recovery_seconds`.
+- `N` is 1, 2 and 3 for every script except 14, which needs a second replica and runs with 2 and 3: 41 runs. Each run keeps `checks.json` (§9), and `bench recovery-compare <nn>` fails if `books` or the `/search` answers differ between the runs of a script. The F3 gate is that all 41 runs pass and no comparison fails.
+- The rows that apply in each coordination mode, and how each one recovers there, are in §11.5.
+- `bench recovery-chart` writes its own run, with `<experiment>` `recovery-summary`: `charts/recovery-seconds.png` holds the `recovery_seconds` of every recovery run, one bar per script and `N`, and `sources.txt` lists the `run_id` of each run it read.
+
+## 9. Tests, benchmarks and runs
+
+**Tests.** Each conditional write has a test with two claimants at once, with Testcontainers MongoDB and embedded Hazelcast, in the module that owns it. The functional API checks (F4) live in `checks`, run against the running stack and validate every response against `api/openapi.yaml`. CI runs them with one `query` replica and again with three, which must give the same answers.
+
+**JMH.** In each service's `src/test/java`, with at least 5 warmup and 10 measurement iterations, three forks, so that the error also covers the differences between JVMs, a fixed `-Xmx` and JSON output (`-rf json`) in the `jmh/` folder of its run; `bench` converts it to CSV. The iterations, forks and heap go in the benchmark's annotations, so every way of launching it keeps them, and each benchmark sets an iteration length that fits how long its operation takes. They run with `exec:exec` and `%classpath`, because JMH cannot fork its JVM from `exec:java`.
+
+**Runs.** Every figure in the report can be traced to a run: the footer of each table and chart carries its `run_id`, and the run keeps the command, the configuration and the raw data.
+
+- `run_id` is `<YYYYMMDD-HHMMSS>-<experiment>-<short commit>`, for example `20261110-153000-search-latency-3f2a9c1`. In a recovery run, `<experiment>` is `recovery-<nn>-r<N>`, as in `20261110-153000-recovery-04-r2-3f2a9c1`, and `recovery-<nn>-<mode>-r<N>` in a mode other than `hazelcast`, as in `20261110-153000-recovery-04-polling-r2-3f2a9c1`.
+- The experiments are `ingest-throughput` (A), `index-throughput` (B), `search-latency` (C), `coordination-cost` and `resource-usage` (D), and `publication-visibility`, `broker-latency`, `recovery-delay` and `coordination-variants` (B). Each has its script, `scripts/bench/<experiment>.sh`, and each §8 row has its own, `scripts/recovery/<nn>-<row>.sh`. All of them write `benchmarks/runs/<run_id>/`, which is versioned.
+- Scripts only start containers and launch jars. The load generator and result processing (`coordination.csv`, `ingest.csv`, `workers.csv`, `index.csv`, `summary.csv` and the charts, with XChart) are Java, in the `bench` module.
+- Before measuring, the script checks the corpus against `workload/corpus.sha256` (id and SHA-256 of each text) and stops if it does not match: Gutenberg updates its texts, so two caches filled on different days may differ.
+- Books come from the local mirror, as in Stage 1, so the network is not measured. One factor changes at a time, with the hypothesis written before measuring.
+- An experiment that measures several configurations, or repeats one, in a single run splits it into trials, one per configuration and repetition, named `<factor>-<value>-…-rep-<n>`, as in `replicas-2-workers-8-rep-1`. Once each trial's stack is up, the script runs `bench manifest trial <run dir> <trial>`, which adds that trial's replicas and threads per service to `manifest.json`, and when the trial ends it saves the trial's logs in `logs/<trial>/`. `bench wait <state|queue> [<minimum> [<timeout seconds>]]` returns once that state or queue holds at least `<minimum>`, 1 by default, so a trial can start and end on a whole phase instead of the first book, and gives up after the timeout, 300 s by default. `bench wait generation <n> [<timeout seconds>]` returns once `GET /control/status` reports a `generation` of at least `<n>`, so a trial can end when a rebuild has switched generation (§5.4), and gives up after the same timeout and default. `bench wait snapshot <books> [<timeout seconds>]` returns once the snapshot of every `query` replica, asked directly at each address of the `query` service name rather than through nginx, holds at least `<books>` books in `GET /search/filters`, so a trial that measures publication visibility saves its logs only after every replica has logged the `snapshot` line of its last batch (§4.8), however late its periodic refresh comes.
+- The runs the report cites are official: they come from the campaign below, on the same machine and from one clean commit, and the owner of each experiment commits its run. The other runs of 2 to 4 November, from clean `dev` commits, stay in git and are no longer cited. The campaign reuses two of them, on the same machine, because the code they measure did not change since their commit, which `git diff` shows: `20261104-140900-search-latency-8e1c1e8` for `search-latency`, whose request path only had refactors, and the JMH of `20261103-204454-index-throughput-6925d4e` for the indexer's benchmarks. A run made anywhere else is a test run and is not committed. Each configuration runs `TARANTINO_REPETITIONS` times (§4.7), and the repetitions are interleaved: repetition 1 of every configuration, then repetition 2, and so on, so drift over a long run, such as a laptop slowing down as it heats up, spreads across every configuration instead of falling on one.
+- `workload/sample_ids.txt` holds 20 books of the corpus, so all of them are in the cache and in the mirror: with the mirror, a book outside it would end `FAILED` with `NOT_FOUND`. They include books in German and French and one in German and English, so the checks cover the `language` filter.
+- The `campaign` entry, `scripts/bench/all.sh`, runs in 187 steps, one after the other, `ingest-throughput`, `index-throughput` without its JMH (`--without-jmh`), `resource-usage`, `publication-visibility`, `broker-latency` and `coordination-variants`, then the recovery matrix in every mode (§11.5), `recovery-compare` of every row, the recovery summary and `recovery-delay`. It writes `benchmarks/runs/<run_id>/runs.txt` with each step, its exit code and its run folders. It leaves out `search-latency`, reused as said above, and `coordination-cost`, whose trials are the `hazelcast` trials of `coordination-variants`, so the coordination cost comes from that run. To fit one night on the official machine, it runs rows 09–12 of the matrix with N = 1 only in the four modes other than `hazelcast`: their recovery time is mostly the time to process the whole corpus, which `coordination-variants` measures for every N and mode. The campaign is official when it comes from a clean commit of `dev`, or of `arch-testing` with the same code, on the official machine, and every run it opens is official too.
+- Each complexity bound in the report states which assumptions it depends on and is checked with at least three sizes. In Mongo, the plan of each measured query is saved too.
+
+| Run file | Content |
+| --- | --- |
+| `manifest.json` | `run_id`, commit and whether the tree was clean, exact command, start and end, host (CPU, cores, RAM, disk and OS), Docker version and resources, JVM and its flags, git branch, every `TARANTINO_*` variable, replicas and threads per service, or per trial in a run with trials, and client concurrency |
+| `corpus.json` | Corpus ids in order, their combined SHA-256 and the number of books and terms |
+| `jmh/` | Raw JMH output in JSON and its CSV, with forks, iterations and `-Xmx` |
+| `load/` | One row per load-generator request: instant, path, status and latency in µs. Each trial has its own gzip-compressed `load/<trial>.csv.gz`, because a run holds millions of requests and GitHub rejects files over 100 MB |
+| `stats.csv` | `docker stats` every second: container, CPU and memory |
+| `host.csv` | `bench stats`, next to `stats.csv`, every second: the CPU of the whole host in percent of one core, as `docker stats` counts it, and its memory in use, as the operating system of the machine that runs the script reports them. Runs made before 1.9.2 do not have it |
+| `logs/<service>.log` | `docker compose logs --no-color --timestamps <service>` of each service, with the transition logs (§4.8); in a run with trials, `logs/<trial>/<service>.log` |
+| `coordination.csv` | Queue wait and time to publication for each book, and for each trial in a run with trials, derived from the transition logs in `logs/` |
+| `ingest.csv` | `ingest-throughput` only: one row per trial with its factors, its repetition, and the books, seconds and books per second of two windows. The whole window runs from the first download claim to the last book downloaded, and the steady one from the download that completes 10 % of the books to the one that completes 90 %. `summary.csv` holds them as `ingest_throughput` and `ingest_throughput_steady` |
+| `workers.csv` | `ingest-throughput` only: one row per trial with its factors, its repetition, its books and how its download workers spend their time, from the transition lines of each worker thread: the mean work of a book, from its download claim to its download, and the mean gap from a download to the same worker's next claim. `summary.csv` holds them as `download_work` and `download_gap`, and `bench resources` adds the CPU of each service during the ingestion |
+| `index.csv` | `index-throughput` only: one row per trial with its factors, its repetition, and the books, seconds and books per second of its whole window, from the first index claim to the last batch published, in the highest generation a batch of that trial was published in. `summary.csv` holds it as `index_throughput` |
+| `checks.json` | Recovery runs only: `GET /control/status` and the `/search` answers to `workload/queries.txt` once recovered (§8) |
+| `explain/` | `explain("executionStats")` of each measured Mongo query |
+| `summary.csv` | The figures the report cites: metric, configuration, mean, sample standard deviation, half-width of the 95 % CI of the mean, nearest-rank p50, p95 and p99, and unit. The mean, standard deviation and CI are always over the repetitions of one configuration, one value per repetition, with Student's t for n − 1 degrees of freedom, n being the number of repetitions; p50, p95 and p99 are over the pooled values of every repetition (books, `docker stats` refreshes or requests) when the metric has them, and over the repetition values otherwise, where with only a few repetitions p95 and p99 are the maximum and the report does not cite them. The one exception is `search_latency`, one row per `search-latency` trial over the requests of that trial. `bench search-latency <run>` adds, per configuration of `search-latency`, `search_latency_mean`, `search_latency_p50`, `search_latency_p95` and `search_latency_p99` in µs, from each repetition's mean or percentile, and `search_throughput` in requests/s, the answered requests per second of each repetition. `bench resources <run>` adds, per configuration and phase of `resource-usage`, `stack_cpu_total` in percent and `stack_memory_total` in MiB, every container of the stack added up per refresh, next to the `cpu_per_replica`, `cpu_total` and `memory_per_replica` of each service, and, when the run has `host.csv`, `host_cpu_total` in percent and `host_memory_used` in MiB |
+| `charts/` | The run's XChart charts in PNG, each with its `run_id` in the footer |
+| `visibility.csv` | `publication-visibility` and `coordination-variants`: one row per batch and `query` replica, with `trial`, `batch_id`, `replica`, `published_at`, `visible_at` and `visibility_ms`. `summary.csv` holds it as `publication_visibility` |
+| `broker.csv` | `broker-latency` only: one row per trial, with `broker`, `consumers`, `repetition`, `messages`, `p50_us`, `p95_us`, `p99_us` and `throughput_per_s`. `summary.csv` holds them as `broker_latency` and `broker_throughput` |
+| `recovery-delay.csv` | `recovery-delay` only: one row per book, with `source_run_id`, `mode`, `replicas`, `book_id`, `status`, `requeue_delay_ms` and `reclaim_delay_ms`. `summary.csv` holds them as `requeue_delay` and `reclaim_delay`, with each recovery run as one repetition, and has no `requeue_delay` row for a mode and N where no book was requeued |
+| `variants.csv` | `coordination-variants` only: the `summary.csv` rows with a first column `mode`, plus `pipeline_throughput` |
+| `pairs.csv` | `coordination-variants` only: for every pair of modes, N and metric, both means, their difference and the half-width of its 95 % CI |
+| `runs.txt` | `campaign` only: each step, its exit code and its run folders |
+| `log.txt` | Full command output |
+
+## 10. Stage 1
+
+Stage 1 is legacy: its repositories are not modified and its report is not redone. `stage_2` only keeps what it reuses from `stage_1-Java`.
+
+- Reused: `IngestBookCommand`, `GutenbergHttpDownloader` and `LocalMirrorDownloader`, the `batch` datalake, `IndexBookCommand`, `Tokenizer`, `HeaderParser`, `SearchCommand` and the Mongo readers, the candidate list and configuration validation, the hexagonal architecture, the Testcontainers tests, `workload/` and `scripts/fill_cache.sh`.
+- Not moved to `stage_2`: the `time` and `book` datalakes, the `json` and `folders` indexes, the `sqlite` metadata, `QueryTerms`, `ControlPipeline`, `LocalCrawler`, `LocalIndexer`, the state files, the `crawler`'s startup cleanup of `.tmp` files and headers, `SPEC.md`, `ANALYSIS.md`, `BENCHMARKS.md` and the rest of `scripts/`, nor their tests and benchmarks.
+- `MongoDatabases`, `FileStopwordsLoader`, `Tokenizer` and the datalake paths move to `common`, and their copies leave the services.
+- If an inherited test contradicts this file, this file wins. The `workload/conformance/` cases that still apply stay as inherited tests; new cases go in the service's JUnit tests.
+
+## 11. Coordination modes
+
+### 11.1 Selection
+
+`TARANTINO_COORDINATION` selects how work reaches the workers and how `query` learns of a publication; everything else is the same in every mode: the datalake, MongoDB, the §5.1 conditional writes, the tokenizer, the index, the search and the front-end API. A message, an HTTP call or a poll is only a hint: the claim in MongoDB decides, a failed claim drops the work and `control` repairs from MongoDB. Each mode starts with its Compose override (§2.4), and the scripts select it with `TARANTINO_VARIANT`, which also takes `activemq-persistent`.
+
+| Mode | Mechanism | `crawler` and `indexer` take work | `query` learns of a batch | Lost work comes back |
+| --- | --- | --- | --- | --- |
+| `hazelcast` | Choreography over Hazelcast | `IQueue` | `ITopic` listener and the period | `control` requeue (§5.3, step 4) |
+| `activemq` | The same choreography over ActiveMQ Classic | JMS queues | JMS topic listener and the period | `control` requeue; with persistence, broker redelivery |
+| `polling` | Time-based, over shared state | “Claim the next book” and “Claim the next book for a batch” (§5.1) | The period only | Nothing to requeue: a waiting book is polled |
+| `orchestrator` | Classical orchestration by `control` | `POST /internal/download` and `POST /internal/index` into a local queue | `POST /internal/snapshot/refresh` and the period | `control` dispatching again |
+
+With `TARANTINO_SNAPSHOT_ON_PUBLISH=false`, `query` registers no listener in any mode. A broker's name is what `/health` lists in `down` (§6.5).
+
+### 11.2 `activemq`
+
+- ActiveMQ Classic 6, image `apache/activemq-classic`, with the client at the same version. `activemq/activemq.xml` is the image's file plus `<statisticsBrokerPlugin/>`.
+- The URL is `failover:(tcp://activemq:61616)?timeout=1000`: a send while the broker is down fails after 1 s, and the handlers answer `503`. Each process opens one connection on a background thread that retries every 2 s; until it starts, the broker reports itself not connected and every queue handle throws.
+- Each `BookTasks` handle owns a session and a producer, and creates its consumer on its first `poll` or `drain`, with `consumer.prefetchSize=1` on `books-to-download` and `TARANTINO_INDEX_BATCH` on `books-to-index`. `published-batches` is a non-durable topic with one listener per `query` replica.
+- With `TARANTINO_ACTIVEMQ_PERSISTENT=false`: non-persistent delivery and automatic acknowledgement, the guarantees of an `IQueue`. With `true`: persistent delivery and client acknowledgement, called when the job returns, so a message not acknowledged when its consumer dies goes to another consumer.
+- Queue sizes come from the statistics plugin, `ActiveMQ.Statistics.Destination.<queue>`, which answers on a temporary queue that is deleted after each read, because a temporary queue otherwise lives as long as its connection.
+
+### 11.3 `polling`
+
+- Each `crawler` worker applies “Claim the next book” and sleeps `TARANTINO_POLL_MILLIS` when none waits; when it claims one, it asks again at once. Nothing is enqueued: `POST /ingest` only writes state, and a failed download ends `QUEUED` with a new `enqueued_at`.
+- Each `indexer` opens a batch and applies “Claim the next book for a batch” until it has `TARANTINO_INDEX_BATCH` books or `TARANTINO_BATCH_TIMEOUT_SECONDS` have passed since its first claim. It announces nothing, and `POST /index/update` writes nothing, because a `DOWNLOADED` book is polled.
+- `control` enqueues nothing and skips step 4 of §5.3; `GET /control/status` reports in `queues` the `QUEUED` and `DOWNLOADED` books.
+
+### 11.4 `orchestrator`
+
+- `control` runs a tick every `TARANTINO_ORCHESTRATOR_TICK_MILLIS` on its own thread. It keeps in memory the books it dispatched to download and to index, each with the instant of its last dispatch; a book stays in flight while it is still `QUEUED` or `DOWNLOADED`.
+- Each tick: it drops the books that left their waiting state; it dispatches the oldest waiting books not in flight, up to `TARANTINO_ORCHESTRATOR_DOWNLOAD_WINDOW` and `TARANTINO_ORCHESTRATOR_INDEX_WINDOW` in flight, one `POST` at a time to `TARANTINO_ORCHESTRATOR_TARGET`, stopping a stage at the first `503` or error; it dispatches again every book whose last dispatch is older than `TARANTINO_REQUEUE_SECONDS`, with a transition line with equal `from` and `to`; and it announces each new `PUBLISHED` batch of the current generation to every `query` replica with `POST /internal/snapshot/refresh`.
+- `POST /internal/download` and `POST /internal/index` take a `BookTask` JSON and only offer it to the replica's local queue, of `TARANTINO_LOCAL_DOWNLOAD_CAPACITY` and `TARANTINO_LOCAL_INDEX_CAPACITY`: `202` if it went in, `400` with `INVALID_PARAMETER` for an invalid body and `503` with `DEPENDENCY_UNAVAILABLE` and `Retry-After: 1` if the queue is full. nginx's server on 8082 hands a `503` to the next replica.
+- `control` skips step 4 of §5.3, and `GET /control/status` reports in `queues` the books in flight of each stage. While `control` is down, nothing is dispatched.
+
+### 11.5 Recovery rows in each mode
+
+| Row | `hazelcast` | `activemq` | `activemq-persistent` | `polling` | `orchestrator` |
+| --- | --- | --- | --- | --- | --- |
+| 01 to 03, 06, 07, 09, 10, 13 and 14 | Yes | Yes | Yes | Yes | Yes |
+| 04 and 05, after dequeue | Yes | Yes | Yes, by redelivery | No: the claim is the dequeue | Yes, by dispatching again |
+| 08 after mark | Yes | Yes | Yes | Yes, with only the period | Yes, the orchestrator announces it |
+| 11 `control` killed | Yes | Yes | Yes | Yes | Yes, and the pipeline stops |
+| 12 broker restarted | Yes | Yes | Yes, messages survive | No: no broker | No: no broker |
+| Runs (N = 1, 2, 3; row 14 with 2 and 3) | 41 | 41 | 41 | 32 | 38 |
+| Runs in the campaign (rows 09–12 with N = 1 outside `hazelcast`, §9) | 41 | 33 | 33 | 26 | 32 |
+
+A row that does not apply prints why and exits 0 without opening a run. `12-broker-restarted.sh` restarts the broker of the mode.

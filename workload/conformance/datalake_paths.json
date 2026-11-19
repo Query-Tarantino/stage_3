@@ -1,0 +1,20 @@
+{
+  "spec": "§4.6 datalake: header and body paths relative to the root, in the directory of book_id / 1000",
+  "cases": [
+    {
+      "id": 999,
+      "header": "0/999.header.txt",
+      "body": "0/999.body.txt"
+    },
+    {
+      "id": 1342,
+      "header": "1/1342.header.txt",
+      "body": "1/1342.body.txt"
+    },
+    {
+      "id": 64317,
+      "header": "64/64317.header.txt",
+      "body": "64/64317.body.txt"
+    }
+  ]
+}

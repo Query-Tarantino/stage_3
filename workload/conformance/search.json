@@ -1,0 +1,54 @@
+{
+  "spec": "§7 search over a small corpus: ids of the books containing every term; their scores tie, so they come by ascending book_id",
+  "stopwords": [
+    "the",
+    "and",
+    "an",
+    "at"
+  ],
+  "books": {
+    "1": "The island and the whale",
+    "2": "An island far away",
+    "3": "Whale songs at sea"
+  },
+  "cases": [
+    {
+      "query": "island",
+      "ids": [
+        1,
+        2
+      ]
+    },
+    {
+      "query": "island whale",
+      "ids": [
+        1
+      ]
+    },
+    {
+      "query": "whale",
+      "ids": [
+        1,
+        3
+      ]
+    },
+    {
+      "query": "ISLAND, Whale!",
+      "ids": [
+        1
+      ]
+    },
+    {
+      "query": "the",
+      "ids": []
+    },
+    {
+      "query": "volcano",
+      "ids": []
+    },
+    {
+      "query": "island volcano",
+      "ids": []
+    }
+  ]
+}
