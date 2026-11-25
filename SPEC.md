@@ -1131,7 +1131,7 @@ In `W1` a book has one copy and a partition no backup, because there is one node
 5. One search phase per value of `TARANTINO_CLIENTS_LIST`: that many closed-loop clients on virtual threads, half on the gateway of `n1` and half on that of `n2`, send `GET /documents/{words}` with the queries of `workload/queries.txt`, for `TARANTINO_WARMUP_SECONDS` that are discarded and `TARANTINO_MEASUREMENT_SECONDS` that are stored. One request in 100 carries `X-Tarantino-Trace: 1`.
 6. `bench record` stops, `cluster/collect.sh` runs and `bench manifest trial` records the trial.
 
-The repetitions are interleaved: repetition 1 of every design, configuration and variant of the block, then repetition 2, so drift over a long session spreads across every configuration. `TARANTINO_REPETITIONS` is 3, because each trial deploys a cluster, and 5 if the trial durations measured in F4 show that it fits in the lab hours.
+The repetitions are interleaved: repetition 1 of every design, configuration and variant of the block, then repetition 2, so drift over a long session spreads across every configuration. `TARANTINO_REPETITIONS` is 3, because each trial deploys a cluster, and 5 if the trial durations measured in F4 show that it fits in the lab hours. Each script of block `comparison` takes `--repetition <n>` and then runs only the trials of that repetition, in a run of its own; without it, it runs every repetition, interleaved, in one run. `all.sh` calls the four scripts with repetition 1, then with repetition 2, and so on, and `bench comparison` reads every run of the block together.
 
 **Measures.** Each has one name and one unit in `summary.csv`, the same in both designs:
 
