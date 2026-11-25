@@ -6,7 +6,6 @@ import org.ulpgc.tarantino.common.mongo.MongoIndexes;
 import org.ulpgc.tarantino.common.startup.Connections;
 import org.ulpgc.tarantino.common.startup.Startup;
 import org.ulpgc.tarantino.common.startup.WorkerThreads;
-import org.ulpgc.tarantino.crawler.adapters.local.LocalDownloadQueue;
 
 import java.util.List;
 import java.util.stream.IntStream;
@@ -17,10 +16,9 @@ public class Main {
     public static void main(String[] args) {
         TarantinoConfig config = TarantinoConfig.fromEnvironment(TarantinoService.CRAWLER);
         Connections connections = Connections.open(config);
-        LocalDownloadQueue localDownloads = new LocalDownloadQueue(config.localDownloadCapacity());
-        Startup.start(config, connections, List.of(), CrawlerFactory.routes(config, connections, localDownloads));
+        Startup.start(config, connections, List.of(), CrawlerFactory.routes(connections));
         Startup.retry("create the book state indexes", () -> MongoIndexes.ensureStateIndexes(connections.database()));
         IntStream.range(0, config.parallelDownloads()).forEach(index -> WorkerThreads.start("download-" + index,
-                CrawlerFactory.downloadWorker(config, connections, localDownloads)));
+                CrawlerFactory.downloadWorker(config, connections)));
     }
 }

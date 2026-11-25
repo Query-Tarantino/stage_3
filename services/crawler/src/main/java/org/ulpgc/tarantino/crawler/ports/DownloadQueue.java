@@ -11,7 +11,7 @@ public interface DownloadQueue {
     /** The next message of {@code books-to-download}, waiting up to {@code wait} for one. */
     Optional<BookTask> next(Duration wait) throws InterruptedException;
 
-    /** Acknowledges the messages taken so far, once their job is over (SPEC §11.2). */
+    /** Acknowledges the messages taken so far, once their job is over (SPEC §4.2). */
     default void acknowledge() {
     }
 }

@@ -6,13 +6,11 @@ import com.mongodb.client.model.Filters;
 import com.mongodb.client.model.FindOneAndUpdateOptions;
 import com.mongodb.client.model.Projections;
 import com.mongodb.client.model.ReturnDocument;
-import com.mongodb.client.model.Sorts;
 import org.bson.Document;
 import org.bson.conversions.Bson;
 import org.ulpgc.tarantino.common.model.BookErrorCode;
 import org.ulpgc.tarantino.common.model.BookStatus;
 import org.ulpgc.tarantino.common.mongo.MongoCollections;
-import org.ulpgc.tarantino.crawler.model.ClaimedBook;
 import org.ulpgc.tarantino.crawler.ports.BookClaims;
 
 import java.time.Duration;
@@ -59,18 +57,6 @@ public class MongoBookClaims implements BookClaims {
         String claimId = UUID.randomUUID().toString();
         Bson queued = Filters.and(Filters.eq(ID, bookId), Filters.eq(STATUS, BookStatus.QUEUED.name()));
         return states.updateOne(queued, set(claimChange(claimId))).getMatchedCount() == 1 ? Optional.of(claimId) : Optional.empty();
-    }
-
-    /** “Claim the next book”: the oldest {@code QUEUED} book by {@code enqueued_at} and {@code _id}, claimed in the same write. */
-    @Override
-    public Optional<ClaimedBook> claimNext() {
-        String claimId = UUID.randomUUID().toString();
-        FindOneAndUpdateOptions oldestFirst = new FindOneAndUpdateOptions()
-                .sort(Sorts.ascending(ENQUEUED_AT, ID))
-                .returnDocument(ReturnDocument.AFTER)
-                .projection(Projections.include(ENQUEUED_AT));
-        return Optional.ofNullable(states.findOneAndUpdate(Filters.eq(STATUS, BookStatus.QUEUED.name()), set(claimChange(claimId)), oldestFirst))
-                .map(state -> new ClaimedBook(state.getInteger(ID), claimId, state.getDate(ENQUEUED_AT).toInstant()));
     }
 
     private Document claimChange(String claimId) {

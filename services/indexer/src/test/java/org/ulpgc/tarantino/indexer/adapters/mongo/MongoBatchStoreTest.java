@@ -31,7 +31,6 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.IntStream;
-import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -71,32 +70,6 @@ class MongoBatchStoreTest {
         store.open(1);
 
         assertTrue(postings.listIndexes().into(new ArrayList<>()).stream().anyMatch(index -> index.getBoolean(UNIQUE, false)));
-    }
-
-    @Test
-    void twoPollingBatchesAtOnceClaimEveryDownloadedBookOnceInOrderOfArrival() throws Exception {
-        MongoBatchStore store = store(LEASE);
-        BOOKS.forEach(this::downloaded);
-        Batch first = store.open(1);
-        Batch second = store.open(1);
-
-        List<List<Integer>> claimed = TwoAtOnce.call(() -> claimAll(store, first), () -> claimAll(store, second));
-
-        assertEquals(BOOKS, Stream.concat(claimed.get(0).stream(), claimed.get(1).stream()).sorted().toList());
-        assertFalse(store.anyDownloaded());
-        claimed.get(0).forEach(bookId -> assertEquals(first.batchId(), state(bookId).getObjectId(MongoFields.BATCH_ID).toHexString()));
-    }
-
-    @Test
-    void findsDownloadedBooksOnlyWhenOneWaits() {
-        MongoBatchStore store = store(LEASE);
-        assertFalse(store.anyDownloaded());
-
-        downloaded(1342);
-
-        assertTrue(store.anyDownloaded());
-        assertEquals(1342, store.claimNext(store.open(1)).orElseThrow().bookId());
-        assertEquals(Optional.empty(), store.claimNext(store.open(1)));
     }
 
     @Test
@@ -233,10 +206,6 @@ class MongoBatchStoreTest {
 
     private Document batchDocument(Batch batch) {
         return batches().find(Filters.eq(MongoFields.ID, new ObjectId(batch.batchId()))).first();
-    }
-
-    private static List<Integer> claimAll(MongoBatchStore store, Batch batch) {
-        return Stream.generate(() -> store.claimNext(batch)).takeWhile(Optional::isPresent).map(claimed -> claimed.orElseThrow().bookId()).toList();
     }
 
     private MongoBatchStore store(Duration lease) {
