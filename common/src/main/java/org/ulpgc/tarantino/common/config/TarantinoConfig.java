@@ -1,6 +1,8 @@
 package org.ulpgc.tarantino.common.config;
 
 import org.ulpgc.tarantino.common.hazelcast.HazelcastContracts;
+import org.ulpgc.tarantino.common.model.WorkerIdentity;
+import org.ulpgc.tarantino.common.roles.RoleNames;
 
 import java.nio.file.Path;
 import java.time.Duration;
@@ -37,7 +39,17 @@ public record TarantinoConfig(
         Duration cleanup,
         Duration snapshot,
         String corsOrigin,
-        Optional<CrashPoint> crashAt) {
+        Optional<CrashPoint> crashAt,
+        IndexDesign indexDesign,
+        String node,
+        String workerId,
+        Optional<String> advertiseHost,
+        List<String> roles,
+        int hazelcastPort,
+        Duration hazelcastFailure,
+        Duration workerHeartbeat,
+        Duration workerTimeout,
+        Duration peerTimeout) {
 
     /** The {@code TARANTINO_CANDIDATES} value that seeds every book of the local mirror. */
     public static final String MIRROR_CANDIDATES = "mirror";
@@ -48,8 +60,9 @@ public record TarantinoConfig(
     public static final String SNAPSHOT_SECONDS = "TARANTINO_SNAPSHOT_SECONDS";
     public static final int DEFAULT_SNAPSHOT_SECONDS = 5;
 
+    private static final String FIRST_WORKER_OF_NODE = "-w1";
     private static final int MIN_LEASES_BEFORE_DELETING = 10;
-    private static final int MIN_HEARTBEATS_PER_LEASE = 3;
+    private static final int MIN_HEARTBEATS_BEFORE_EXPIRY = 3;
 
     public static TarantinoConfig fromEnvironment(TarantinoService service) {
         return from(System.getenv(), service);
@@ -57,6 +70,7 @@ public record TarantinoConfig(
 
     public static TarantinoConfig from(Map<String, String> environment, TarantinoService service) {
         Variables variables = new Variables(environment);
+        String node = variables.text("TARANTINO_NODE", LocalHost.name(environment));
         TarantinoConfig config = new TarantinoConfig(
                 variables.positive("TARANTINO_PORT", service.defaultPort()),
                 variables.optionalPositive("TARANTINO_HTTP_THREADS"),
@@ -80,14 +94,38 @@ public record TarantinoConfig(
                 variables.seconds("TARANTINO_CLEANUP_SECONDS", 3600),
                 variables.seconds(SNAPSHOT_SECONDS, DEFAULT_SNAPSHOT_SECONDS),
                 variables.text("TARANTINO_CORS_ORIGIN", "*"),
-                variables.optionalText("TARANTINO_CRASH_AT").map(point -> crashPoint(service, point)));
+                variables.optionalText("TARANTINO_CRASH_AT").map(point -> crashPoint(service, point)),
+                indexDesign(variables.text("TARANTINO_INDEX_DESIGN", IndexDesign.LOCAL.variableValue())),
+                node,
+                variables.text("TARANTINO_WORKER_ID", node + FIRST_WORKER_OF_NODE),
+                variables.optionalText("TARANTINO_ADVERTISE_HOST"),
+                variables.listOrEmpty("TARANTINO_ROLES", String.join(",", RoleNames.ALL)),
+                variables.positive("TARANTINO_HAZELCAST_PORT", 5701),
+                variables.seconds("TARANTINO_HAZELCAST_FAILURE_SECONDS", 10),
+                variables.seconds("TARANTINO_WORKER_HEARTBEAT_SECONDS", 2),
+                variables.seconds("TARANTINO_WORKER_TIMEOUT_SECONDS", 10),
+                variables.seconds("TARANTINO_PEER_TIMEOUT_SECONDS", 5));
         config.checkInvariants();
         return config;
     }
 
+    /** Who this worker is in the registry and in every log line (SPEC §13.1). */
+    public WorkerIdentity identity() {
+        return new WorkerIdentity(workerId, node);
+    }
+
+    /** {@code TARANTINO_ADVERTISE_HOST}, or else the IPv4 address that {@code TARANTINO_NODE} resolves to (SPEC §4.7). */
+    public String advertisedHost() {
+        return advertiseHost.orElseGet(() -> LocalHost.address(node));
+    }
+
     private void checkInvariants() {
-        require(heartbeat.multipliedBy(MIN_HEARTBEATS_PER_LEASE).compareTo(lease) <= 0,
+        require(heartbeat.multipliedBy(MIN_HEARTBEATS_BEFORE_EXPIRY).compareTo(lease) <= 0,
                 "TARANTINO_HEARTBEAT_SECONDS", "must be at most TARANTINO_LEASE_SECONDS / 3");
+        require(workerHeartbeat.multipliedBy(MIN_HEARTBEATS_BEFORE_EXPIRY).compareTo(workerTimeout) <= 0,
+                "TARANTINO_WORKER_HEARTBEAT_SECONDS", "must be at most TARANTINO_WORKER_TIMEOUT_SECONDS / 3");
+        require(RoleNames.ALL.containsAll(roles) && roles.stream().distinct().count() == roles.size(),
+                "TARANTINO_ROLES", "must hold only crawler, indexer and query, without repeats");
         require(gc.compareTo(lease.multipliedBy(MIN_LEASES_BEFORE_DELETING)) >= 0,
                 "TARANTINO_GC_SECONDS", "must be at least 10 × TARANTINO_LEASE_SECONDS");
         require(tmpMaxAge.compareTo(lease.multipliedBy(MIN_LEASES_BEFORE_DELETING)) >= 0,
@@ -102,6 +140,11 @@ public record TarantinoConfig(
         if (!holds) {
             throw new InvalidConfigurationException(variable, reason);
         }
+    }
+
+    private static IndexDesign indexDesign(String value) {
+        return IndexDesign.of(value).orElseThrow(() -> new InvalidConfigurationException("TARANTINO_INDEX_DESIGN",
+                "must be local or grid, not " + value));
     }
 
     private static CrashPoint crashPoint(TarantinoService service, String point) {
