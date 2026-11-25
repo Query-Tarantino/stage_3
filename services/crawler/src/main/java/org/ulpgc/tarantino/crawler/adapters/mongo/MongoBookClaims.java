@@ -35,8 +35,7 @@ import static org.ulpgc.tarantino.common.mongo.UpdatePipelines.set;
 import static org.ulpgc.tarantino.common.mongo.UpdatePipelines.setThenUnset;
 
 /**
- * “Claim a book”, “Claim the next book”, “Renew a book”, “Finish a download” and “Fail a download” (SPEC §5.1), each a single conditional
- * write.
+ * “Claim a book”, “Renew a book”, “Finish a download” and “Fail a download” (SPEC §5.1), each a single conditional write.
  */
 public class MongoBookClaims implements BookClaims {
 
