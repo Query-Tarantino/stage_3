@@ -57,7 +57,7 @@ public class DownloadBookCommand {
     }
 
     /** The job once the book of a message is claimed with “Claim a book” (SPEC §5.1). */
-    public void executeClaimed(ClaimedBook book) {
+    private void executeClaimed(ClaimedBook book) {
         log.write(Transition.book(book.bookId(), BookStatus.QUEUED, BookStatus.DOWNLOADING).fromMessageEnqueuedAt(book.enqueuedAt()));
         crashPoints.accept(CrashPoint.AFTER_CLAIM);
         try (Lease lease = heartbeats.apply(() -> claims.renew(book.bookId(), book.claimId()))) {
