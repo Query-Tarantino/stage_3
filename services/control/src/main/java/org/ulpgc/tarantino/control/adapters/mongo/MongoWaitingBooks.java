@@ -21,7 +21,7 @@ import static org.ulpgc.tarantino.common.mongo.MongoFields.ENQUEUED_AT;
 import static org.ulpgc.tarantino.common.mongo.MongoFields.ID;
 import static org.ulpgc.tarantino.common.mongo.MongoFields.STATUS;
 
-/** The reads of the waiting books in {@code book_states} (SPEC §5.3, step 4), on the index {@code {status: 1, enqueued_at: 1}}. */
+/** The reads of the waiting books in {@code book_states}, on the index {@code {status: 1, enqueued_at: 1}} (SPEC §4.4). */
 public class MongoWaitingBooks implements WaitingBooks {
 
     private final MongoCollection<Document> states;

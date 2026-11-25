@@ -7,7 +7,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 
-/** The books waiting in {@code book_states} for a queue, oldest first, for step 4 of the reconciliation (SPEC §5.3). */
+/** The books waiting in {@code book_states} for each queue, oldest first (SPEC §5.3). */
 public interface WaitingBooks {
 
     /** The state of each of these books that has a document. */
