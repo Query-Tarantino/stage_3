@@ -34,6 +34,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import static org.ulpgc.tarantino.common.mongo.MongoFields.BATCH_ID;
 import static org.ulpgc.tarantino.common.mongo.MongoFields.BOOK_IDS;
 import static org.ulpgc.tarantino.common.mongo.MongoFields.CLAIM_ID;
+import static org.ulpgc.tarantino.common.mongo.MongoFields.ENQUEUED_AT;
 import static org.ulpgc.tarantino.common.mongo.MongoFields.GENERATION;
 import static org.ulpgc.tarantino.common.mongo.MongoFields.ID;
 import static org.ulpgc.tarantino.common.mongo.MongoFields.LAST_ERROR;
@@ -118,6 +119,16 @@ public class MongoBatchStore implements BatchStore {
     public boolean failAtIndexing(Batch batch, int bookId) {
         Document change = new Document(STATUS, BookStatus.FAILED.name())
                 .append(LAST_ERROR, BookErrorCode.NOT_IN_DATALAKE.name())
+                .append(UPDATED_AT, NOW);
+        return states.updateOne(Filters.and(Filters.eq(ID, bookId), indexingIn(batch)), setThenUnset(change, BATCH_ID))
+                .getMatchedCount() == 1;
+    }
+
+    @Override
+    public boolean releaseUnreadable(Batch batch, int bookId) {
+        Document change = new Document(STATUS, BookStatus.DOWNLOADED.name())
+                .append(LAST_ERROR, BookErrorCode.DOCUMENT_UNAVAILABLE.name())
+                .append(ENQUEUED_AT, NOW)
                 .append(UPDATED_AT, NOW);
         return states.updateOne(Filters.and(Filters.eq(ID, bookId), indexingIn(batch)), setThenUnset(change, BATCH_ID))
                 .getMatchedCount() == 1;

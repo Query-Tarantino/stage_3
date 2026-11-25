@@ -25,6 +25,12 @@ public interface BatchStore {
     /** “Fail at indexing” with {@code NOT_IN_DATALAKE}: false if the book is no longer in the batch. */
     boolean failAtIndexing(Batch batch, int bookId);
 
+    /**
+     * “Release an unreadable book” with {@code DOCUMENT_UNAVAILABLE}: the book goes back to {@code DOWNLOADED} without a
+     * message, and {@code control} enqueues it again (SPEC §4.6). False if it is no longer in the batch.
+     */
+    boolean releaseUnreadable(Batch batch, int bookId);
+
     /** “Publish a batch”: its {@code published_at}, or empty if its lease was lost. */
     Optional<Instant> publish(Batch batch, List<Integer> bookIds);
 

@@ -298,6 +298,11 @@ class IndexBatchCommandTest {
         }
 
         @Override
+        public boolean releaseUnreadable(Batch batch, int bookId) {
+            return indexing.remove(bookId);
+        }
+
+        @Override
         public Optional<Instant> publish(Batch batch, List<Integer> bookIds) {
             steps.add("publish");
             if (leaseLost) {

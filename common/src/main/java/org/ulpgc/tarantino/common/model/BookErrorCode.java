@@ -7,5 +7,6 @@ public enum BookErrorCode {
     NETWORK_ERROR,
     STORAGE_ERROR,
     LEASE_EXPIRED,
-    NOT_IN_DATALAKE
+    NOT_IN_DATALAKE,
+    DOCUMENT_UNAVAILABLE
 }
