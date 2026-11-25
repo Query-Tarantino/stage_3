@@ -40,7 +40,7 @@ public final class CrawlerFactory {
 
     /** One worker for one thread, with its own handles on {@code books-to-download} and {@code books-to-index} (SPEC §4.2). */
     public static Runnable downloadWorker(TarantinoConfig config, Connections connections) {
-        Broker broker = connections.broker().orElseThrow();
+        Broker broker = connections.broker();
         MongoBookClaims claims = new MongoBookClaims(connections.database(), config.lease(), config.maxAttempts());
         Consumer<CrashPoint> crashPoints = new CrashPoints(config.crashAt())::hit;
         BookTasks downloads = broker.queue(MessagingContracts.BOOKS_TO_DOWNLOAD);
@@ -67,7 +67,7 @@ public final class CrawlerFactory {
     }
 
     private static TaskQueue downloadQueueOnEachUse(Connections connections) {
-        Broker broker = connections.broker().orElseThrow();
+        Broker broker = connections.broker();
         return task -> broker.offer(MessagingContracts.BOOKS_TO_DOWNLOAD, task);
     }
 

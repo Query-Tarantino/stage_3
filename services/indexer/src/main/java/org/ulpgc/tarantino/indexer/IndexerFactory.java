@@ -39,7 +39,7 @@ public final class IndexerFactory {
 
     /** The batch loop over {@code books-to-index}, which announces each published batch on {@code published-batches} (SPEC §4.2). */
     public static Runnable indexWorker(TarantinoConfig config, Connections connections) {
-        Broker broker = connections.broker().orElseThrow();
+        Broker broker = connections.broker();
         MongoBatchStore batches = new MongoBatchStore(connections.database(), config.lease(), Replica.name());
         BatchCollector collector = new BatchCollector(new BrokerIndexQueue(broker.queue(MessagingContracts.BOOKS_TO_INDEX)),
                 config.indexBatch(), config.batchTimeout(), Clock.systemUTC());
@@ -63,7 +63,7 @@ public final class IndexerFactory {
     }
 
     private static BooksToIndex booksToIndex(Connections connections) {
-        Broker broker = connections.broker().orElseThrow();
+        Broker broker = connections.broker();
         return task -> broker.offer(MessagingContracts.BOOKS_TO_INDEX, task);
     }
 

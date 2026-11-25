@@ -125,15 +125,15 @@ public final class ControlFactory {
     }
 
     private static QueueSizes queueSizes(Connections connections) {
-        return new BrokerQueueSizes(connections.broker().orElseThrow());
+        return new BrokerQueueSizes(connections.broker());
     }
 
     private static DownloadQueue downloadQueue(Connections connections) {
-        return new BrokerTaskQueue(connections.broker().orElseThrow(), MessagingContracts.BOOKS_TO_DOWNLOAD);
+        return new BrokerTaskQueue(connections.broker(), MessagingContracts.BOOKS_TO_DOWNLOAD);
     }
 
     private static IndexQueue indexQueue(Connections connections) {
-        return new BrokerTaskQueue(connections.broker().orElseThrow(), MessagingContracts.BOOKS_TO_INDEX);
+        return new BrokerTaskQueue(connections.broker(), MessagingContracts.BOOKS_TO_INDEX);
     }
 
     private static List<Integer> ids(Path file) {

@@ -40,14 +40,12 @@ public class Main {
     }
 
     /**
-     * At startup, every TARANTINO_SNAPSHOT_SECONDS and, when the mode has a broker and TARANTINO_SNAPSHOT_ON_PUBLISH is
-     * true, on each BatchPublished, which only asks the thread to refresh (SPEC §7 and §11.1).
+     * At startup, every TARANTINO_SNAPSHOT_SECONDS and on each BatchPublished, whose listener only asks the thread to
+     * refresh (SPEC §7).
      */
     private static void refreshOnOneThread(TarantinoConfig config, Connections connections, Runnable refresh,
                                            ScheduledExecutorService refresher, Runnable askForRefresh) {
         refresher.scheduleWithFixedDelay(refresh, 0, config.snapshot().toMillis(), TimeUnit.MILLISECONDS);
-        connections.broker()
-                .filter(broker -> config.snapshotOnPublish())
-                .ifPresent(broker -> broker.announcements().listen(batch -> askForRefresh.run()));
+        connections.broker().announcements().listen(batch -> askForRefresh.run());
     }
 }

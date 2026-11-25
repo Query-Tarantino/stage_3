@@ -5,7 +5,6 @@ import com.mongodb.MongoSocketException;
 import com.mongodb.MongoTimeoutException;
 import io.javalin.Javalin;
 import io.javalin.http.Context;
-import io.javalin.http.Header;
 import io.javalin.http.HttpStatus;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -14,14 +13,12 @@ import org.ulpgc.tarantino.common.messaging.BrokerUnavailableException;
 import org.ulpgc.tarantino.common.model.ProblemCode;
 import org.ulpgc.tarantino.common.mongo.NoGenerationPointerException;
 
-import java.time.Duration;
-
 /**
  * Answers every error as Problem Details (RFC 9457, SPEC §6.6): {@code parameter} only in {@code 400} responses,
  * {@code Retry-After} on every {@code 503}, {@code 500} without {@code code} for anything unexpected and {@code 404} without
  * {@code code} for a path or method the service does not have, as nginx answers an unknown path (SPEC §6.6). Mongo or
- * the broker of the mode not answering, or a generation pointer that does not exist yet, is {@code 503} with
- * {@code DEPENDENCY_UNAVAILABLE} (SPEC §4.5 and §11).
+ * Hazelcast not answering, or a generation pointer that does not exist yet, is {@code 503} with
+ * {@code DEPENDENCY_UNAVAILABLE} (SPEC §4.5).
  */
 public final class ProblemDetails {
 
@@ -48,12 +45,6 @@ public final class ProblemDetails {
             answer(context, HttpStatus.INTERNAL_SERVER_ERROR, null, null, null);
         });
         app.error(HttpStatus.NOT_FOUND, ProblemDetails::answerUnknownRoute);
-    }
-
-    /** A {@code 503} that asks to retry after {@code retryAfter} instead of the usual 5 s (SPEC §11.4). */
-    public static void unavailable(Context context, String detail, Duration retryAfter) {
-        unavailable(context, detail);
-        context.header(Header.RETRY_AFTER, String.valueOf(retryAfter.toSeconds()));
     }
 
     /** Javalin's own 404, for a route the service lacks; a {@code 404} the handlers already answered stays as it is. */

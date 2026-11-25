@@ -20,8 +20,6 @@ final class InsideCompose {
     private static final String COMPOSE_FILE_VARIABLE = "COMPOSE_FILE";
     private static final String COMPOSE_FILE = "docker-compose.yml";
     private static final String GET = "GET";
-    private static final String POST = "POST";
-    private static final String JSON_CONTENT = "Content-Type: application/json";
     private static final String BLANK_LINE = "\r?\n\r?\n";
     private static final String LINE_BREAK = "\r?\n";
     private static final String SPACES = "\\s+";
@@ -37,16 +35,6 @@ final class InsideCompose {
     /** {@code GET url} from inside {@code service}, validated as {@code apiPath}. */
     CheckedClient.Response get(String service, String url, String apiPath) throws IOException, InterruptedException {
         return send(service, List.of("curl", "-isS", url), GET, apiPath);
-    }
-
-    /** {@code POST url} without a body from inside {@code service}, validated as {@code apiPath}. */
-    CheckedClient.Response post(String service, String url, String apiPath) throws IOException, InterruptedException {
-        return send(service, List.of("curl", "-isS", "-X", POST, url), POST, apiPath);
-    }
-
-    /** {@code POST url} with a JSON body from inside {@code service}, validated as {@code apiPath}. */
-    CheckedClient.Response postJson(String service, String url, String json, String apiPath) throws IOException, InterruptedException {
-        return send(service, List.of("curl", "-isS", "-X", POST, "-H", JSON_CONTENT, "--data", json, url), POST, apiPath);
     }
 
     private CheckedClient.Response send(String service, List<String> curl, String method, String apiPath)

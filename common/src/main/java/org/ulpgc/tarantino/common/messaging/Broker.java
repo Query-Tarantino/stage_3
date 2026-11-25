@@ -2,7 +2,7 @@ package org.ulpgc.tarantino.common.messaging;
 
 import org.ulpgc.tarantino.common.model.BookTask;
 
-/** The message broker of a coordination mode that uses one (SPEC §11.1). */
+/** The queues and the topic of SPEC §4.2 in Hazelcast. */
 public interface Broker extends AutoCloseable {
 
     /** A new handle on the queue on each call. */
@@ -10,7 +10,7 @@ public interface Broker extends AutoCloseable {
 
     /**
      * Offers one task through a handle of its own, closed right after, for a thread that keeps no handle, such as an
-     * HTTP handler (SPEC §11.2).
+     * HTTP handler (SPEC §4.2).
      */
     default void offer(String queue, BookTask task) {
         try (BookTasks handle = queue(queue)) {
