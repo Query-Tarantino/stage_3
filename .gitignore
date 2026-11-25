@@ -6,7 +6,9 @@ target/
 *.pdf
 !/report/QueryTarantino_Stage2_Report.pdf
 .idea/
-plan-stage-2.md
+plan-stage-3.md
+plan-*-stage-3.md
+audit-stage-3.md
 CLAUDE.md
 CLAUDE.local.md
 
@@ -15,6 +17,7 @@ CLAUDE.local.md
 /benchmarks/cache/
 /benchmarks/mirror/
 /benchmarks/tmp.noindex/
+/cluster/inventory.env
 
 ### IntelliJ IDEA ###
 .idea/modules.xml
