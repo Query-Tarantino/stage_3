@@ -5,7 +5,6 @@ import org.ulpgc.tarantino.common.config.TarantinoService;
 import org.ulpgc.tarantino.common.mongo.MongoIndexes;
 import org.ulpgc.tarantino.common.startup.Connections;
 import org.ulpgc.tarantino.common.startup.Startup;
-import org.ulpgc.tarantino.common.startup.WorkerThreads;
 
 import java.util.List;
 
@@ -17,6 +16,6 @@ public class Main {
         Connections connections = Connections.open(config);
         Startup.start(config, connections, List.of(), IndexerFactory.routes(connections));
         Startup.retry("create the book state indexes", () -> MongoIndexes.ensureStateIndexes(connections.database()));
-        WorkerThreads.start("index-batches", IndexerFactory.indexWorker(config, connections));
+        IndexerFactory.role(config, connections).start();
     }
 }

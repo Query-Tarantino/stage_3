@@ -10,6 +10,7 @@ import org.ulpgc.tarantino.common.operations.LeaseHeartbeat;
 import org.ulpgc.tarantino.common.operations.Replica;
 import org.ulpgc.tarantino.common.operations.TransitionLog;
 import org.ulpgc.tarantino.common.startup.Connections;
+import org.ulpgc.tarantino.common.startup.WorkerThreads;
 import org.ulpgc.tarantino.common.terms.FileStopwordsLoader;
 import org.ulpgc.tarantino.common.terms.Tokenizer;
 import org.ulpgc.tarantino.indexer.adapters.broker.BrokerIndexQueue;
@@ -24,6 +25,7 @@ import org.ulpgc.tarantino.indexer.commands.BatchCollector;
 import org.ulpgc.tarantino.indexer.commands.BookReader;
 import org.ulpgc.tarantino.indexer.commands.IndexBatchCommand;
 import org.ulpgc.tarantino.indexer.commands.IndexWorker;
+import org.ulpgc.tarantino.indexer.commands.IndexerRole;
 import org.ulpgc.tarantino.indexer.ports.BatchAnnouncer;
 import org.ulpgc.tarantino.indexer.ports.BooksToIndex;
 import org.ulpgc.tarantino.indexer.ports.sources.DatalakeReader;
@@ -34,16 +36,23 @@ import java.util.function.Consumer;
 /** Builds the index worker and the HTTP routes of {@code indexer} over its connections (SPEC §2.2). */
 public final class IndexerFactory {
 
+    private static final String BATCH_LOOP_THREAD = "index-batches";
+
     private IndexerFactory() {
     }
 
-    /** The batch loop over {@code books-to-index}, which announces each published batch on {@code published-batches} (SPEC §4.2). */
-    public static Runnable indexWorker(TarantinoConfig config, Connections connections) {
+    /** The role {@code indexer}: each start, a new batch loop on the thread {@value #BATCH_LOOP_THREAD} (SPEC §13.3). */
+    public static IndexerRole role(TarantinoConfig config, Connections connections) {
+        return new IndexerRole(() -> indexWorker(config, connections), loop -> WorkerThreads.start(BATCH_LOOP_THREAD, loop));
+    }
+
+    /** A batch loop over its own handle on {@code books-to-index}, which announces each published batch (SPEC §4.2). */
+    private static IndexWorker indexWorker(TarantinoConfig config, Connections connections) {
         Broker broker = connections.broker();
         MongoBatchStore batches = new MongoBatchStore(connections.database(), config.lease(), Replica.name());
         BatchCollector collector = new BatchCollector(new BrokerIndexQueue(broker.queue(MessagingContracts.BOOKS_TO_INDEX)),
                 config.indexBatch(), config.batchTimeout(), Clock.systemUTC());
-        return new IndexWorker(collector, indexCommand(config, connections, batches, broker.announcements()::publish));
+        return new IndexWorker(collector, indexCommand(config, connections, batches, broker.announcements()::publish)::execute);
     }
 
     private static IndexBatchCommand indexCommand(TarantinoConfig config, Connections connections, MongoBatchStore batches,

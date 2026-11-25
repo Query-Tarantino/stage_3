@@ -6,10 +6,12 @@ import org.slf4j.LoggerFactory;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
+import java.util.function.Consumer;
 
 /**
- * The batch loop of an indexer replica. If Mongo or the broker fail halfway, it leaves the batch unpublished and goes
- * on: its lease expires and {@code control} sends its books back to the queue.
+ * The batch loop of the role {@code indexer}. If Mongo or Hazelcast fail halfway, it leaves the batch unpublished and
+ * goes on: its lease expires and {@code control} sends its books back to the queue. Once asked to stop, it finishes the
+ * batch it has open and returns (SPEC §13.3).
  */
 public class IndexWorker implements Runnable {
 
@@ -17,16 +19,18 @@ public class IndexWorker implements Runnable {
     private static final Duration PAUSE_AFTER_FAILURE = Duration.ofSeconds(1);
 
     private final BatchCollector collector;
-    private final IndexBatchCommand index;
+    private final Consumer<Map<Integer, Instant>> index;
+    private volatile boolean stopping;
 
-    public IndexWorker(BatchCollector collector, IndexBatchCommand index) {
+    /** {@code index} indexes the books of one batch, each with the {@code enqueued_at} of its message. */
+    public IndexWorker(BatchCollector collector, Consumer<Map<Integer, Instant>> index) {
         this.collector = collector;
         this.index = index;
     }
 
     @Override
     public void run() {
-        while (!Thread.currentThread().isInterrupted()) {
+        while (!stopping && !Thread.currentThread().isInterrupted()) {
             try {
                 indexNextBatch();
             } catch (InterruptedException e) {
@@ -38,13 +42,18 @@ public class IndexWorker implements Runnable {
         }
     }
 
+    /** Asks the loop to return after the batch it has open. */
+    public void stop() {
+        stopping = true;
+    }
+
     private void indexNextBatch() throws InterruptedException {
         Map<Integer, Instant> books = collector.next();
         if (books.isEmpty()) {
             return;
         }
         try {
-            index.execute(books);
+            index.accept(books);
         } finally {
             collector.acknowledge();
         }
