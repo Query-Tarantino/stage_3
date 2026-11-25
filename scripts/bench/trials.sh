@@ -12,24 +12,11 @@ readonly STOPWORDS=workload/stopwords.txt
 readonly REPLICAS_LIST="${TARANTINO_REPLICAS_LIST:-1 2 3}"
 readonly REPETITIONS="${TARANTINO_REPETITIONS:-5}"
 readonly PHASE_TIMEOUT_SECONDS="${TARANTINO_PHASE_TIMEOUT_SECONDS:-1800}"
-readonly VARIANT="${TARANTINO_VARIANT:-hazelcast}"
+readonly EVERY_PROFILE="*"
+readonly COMPOSE=(docker compose -f docker-compose.yml -f docker-compose.mirror.yml)
 
-source scripts/bench/modes.sh
-
-COMPOSE=()
-SERVICES=()
-LOGGED_SERVICES=()
-
-use_mode() {
-    local mode=$1 files
-    files=$(compose_files "$mode")
-    read -r -a COMPOSE <<< "docker compose $files"
-    export_profiles_of_mode "$mode"
-    mapfile -t SERVICES < <("${COMPOSE[@]}" config --services)
-    LOGGED_SERVICES=("${SERVICES[@]}")
-}
-
-use_mode "$VARIANT"
+mapfile -t SERVICES < <("${COMPOSE[@]}" config --services)
+LOGGED_SERVICES=("${SERVICES[@]}")
 
 export TARANTINO_CANDIDATES="${TARANTINO_CANDIDATES:-mirror}"
 
@@ -41,7 +28,7 @@ stats_pid=""
 open_run() {
     local experiment=$1
     shift
-    down_every_mode "${COMPOSE[@]}"
+    "${COMPOSE[@]}" --profile "$EVERY_PROFILE" down -v
     local run_id
     run_id=$(java -jar "$BENCH_JAR" manifest start "$RUNS_DIR" "$experiment" 0 -- "$@")
     run_dir="$RUNS_DIR/$run_id"
