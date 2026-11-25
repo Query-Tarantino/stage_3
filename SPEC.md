@@ -266,7 +266,7 @@ MongoDB, Consul, `control` and the gateways stay on the same nodes in every conf
 - `services/crawler`, `services/indexer` and `services/query` are libraries without a `main`: each exposes one `Role` and its routes, and `worker` is the only module that starts them. `services/control` keeps its own `main`.
 - Immutable records for messages, responses and the index state of `query`; no `synchronized` and no locks on the `query` read path.
 - Javalin handlers only validate, write state and enqueue: they never download or index.
-- SOLID and KISS: no transactions, no broker besides Hazelcast and no layers that a second use does not call for.
+- SOLID and KISS: no MongoDB transactions, no broker besides Hazelcast and no layers that a second use does not call for. The take of §4.2 is a Hazelcast transaction on the queues only.
 
 ## 4. Shared contracts
 
@@ -284,7 +284,7 @@ Every worker embeds a Hazelcast member of the cluster `tarantino`, on port 5701,
 | Name | Type | Content | Written by | Read by |
 | --- | --- | --- | --- | --- |
 | `books-to-download` | Queue | `BookTask` | `control` (seeding, missing messages and expired downloads), `POST /ingest/{book_id}` and the role `crawler` when retrying a failed download | The download workers of the role `crawler` |
-| `books-to-index` | Queue | `BookTask` | The role `crawler` after a complete download, `POST /index/update/{book_id}` and `control` (missing messages, released books and reindexing) | The role `indexer`, in batches with `drainTo` |
+| `books-to-index` | Queue | `BookTask` | The role `crawler` after a complete download, `POST /index/update/{book_id}` and `control` (missing messages, released books and reindexing) | The role `indexer`, in batches, with polls inside one transaction of the take (below) |
 | `published-batches` | Topic | `BatchPublished` | The role `indexer`, when publishing a batch | The role `query` of every worker |
 | `postings-g<n>` | Map, design `grid` | `PostingKey` → `PostingSegment` | The role `indexer` | `TermPostingsTask`, on the member that owns the term |
 | `metadata-g<n>` | Map, design `grid` | `book_id` → `GridBookMetadata` | The role `indexer` | The role `query` |
