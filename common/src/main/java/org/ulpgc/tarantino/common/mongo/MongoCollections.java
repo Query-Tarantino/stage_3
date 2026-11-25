@@ -9,6 +9,7 @@ public final class MongoCollections {
 
     public static final String BOOK_STATES = "book_states";
     public static final String INDEX_STATE = "index_state";
+    public static final String WORKERS = "workers";
     public static final String CURRENT = "current";
     public static final String REBUILD = "rebuild";
 
