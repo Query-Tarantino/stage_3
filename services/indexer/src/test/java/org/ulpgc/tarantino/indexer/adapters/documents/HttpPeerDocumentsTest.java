@@ -28,8 +28,9 @@ class HttpPeerDocumentsTest {
             switch (context.pathParam("book_id")) {
                 case "1342" -> context.json(Map.of("book_id", 1342, "header", "Title: Pride and Prejudice\n",
                         "body", "It is a truth", "sha256", "not checked here"));
-                case "84" -> context.status(404);
+                case "84" -> context.status(404).json(Map.of("status", 404, "code", "BOOK_NOT_FOUND"));
                 case "11" -> Thread.sleep(TIMEOUT.multipliedBy(4));
+                case "2701" -> context.status(404).result("Not found");
                 default -> context.status(500);
             }
         }).start(LOOPBACK, 0);
@@ -49,6 +50,11 @@ class HttpPeerDocumentsTest {
     @Test
     void readsANotFoundAsANodeThatDoesNotHoldTheBook() {
         assertEquals(new DocumentAnswer.NotHere(), peers().fetch(worker, 84));
+    }
+
+    @Test
+    void readsANotFoundWithoutTheBookCodeAsNoAnswer() {
+        assertEquals(new DocumentAnswer.NoAnswer(), peers().fetch(worker, 2701));
     }
 
     @Test

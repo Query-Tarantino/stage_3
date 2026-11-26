@@ -1,20 +1,24 @@
 package org.ulpgc.tarantino.indexer.adapters.documents;
 
 import org.ulpgc.tarantino.common.json.TarantinoJson;
+import org.ulpgc.tarantino.common.model.ProblemCode;
 import org.ulpgc.tarantino.common.model.WorkerAddress;
 import org.ulpgc.tarantino.indexer.model.book.BookText;
 
-import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * Asks another worker for a book with {@code GET /internal/documents/{book_id}} (SPEC §6.8), waiting at most
- * {@code TARANTINO_PEER_TIMEOUT_SECONDS}: {@code 200} is a copy, {@code 404} means that node does not hold it, and
- * anything else, a timeout included, is no answer.
+ * {@code TARANTINO_PEER_TIMEOUT_SECONDS} for the whole answer: {@code 200} is a copy, a {@code 404} with
+ * {@code BOOK_NOT_FOUND} means that node does not hold it, and anything else, a timeout included, is no answer.
  */
 public class HttpPeerDocuments implements PeerDocuments {
 
@@ -36,11 +40,14 @@ public class HttpPeerDocuments implements PeerDocuments {
                 .timeout(timeout)
                 .GET()
                 .build();
+        CompletableFuture<HttpResponse<String>> response = client.sendAsync(request, HttpResponse.BodyHandlers.ofString());
         try {
-            return answer(client.send(request, HttpResponse.BodyHandlers.ofString()), bookId);
-        } catch (IOException | RuntimeException e) {
+            return answer(response.get(timeout.toMillis(), TimeUnit.MILLISECONDS), bookId);
+        } catch (ExecutionException | TimeoutException | RuntimeException e) {
+            response.cancel(true);
             return new DocumentAnswer.NoAnswer();
         } catch (InterruptedException e) {
+            response.cancel(true);
             Thread.currentThread().interrupt();
             return new DocumentAnswer.NoAnswer();
         }
@@ -52,11 +59,20 @@ public class HttpPeerDocuments implements PeerDocuments {
                 PeerCopy copy = TarantinoJson.read(response.body(), PeerCopy.class);
                 yield new DocumentAnswer.Copy(new BookText(bookId, copy.header(), copy.body()));
             }
-            case NOT_FOUND -> new DocumentAnswer.NotHere();
+            case NOT_FOUND -> notHereOrNoAnswer(response.body());
             default -> new DocumentAnswer.NoAnswer();
         };
     }
 
+    /** Only the route's own {@code 404} says the node lacks the book; a path the worker does not serve says nothing. */
+    private static DocumentAnswer notHereOrNoAnswer(String body) {
+        Problem problem = TarantinoJson.read(body, Problem.class);
+        return ProblemCode.BOOK_NOT_FOUND.name().equals(problem.code()) ? new DocumentAnswer.NotHere() : new DocumentAnswer.NoAnswer();
+    }
+
     private record PeerCopy(String header, String body) {
+    }
+
+    private record Problem(String code) {
     }
 }
