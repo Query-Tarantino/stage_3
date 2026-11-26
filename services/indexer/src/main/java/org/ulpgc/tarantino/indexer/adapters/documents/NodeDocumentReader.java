@@ -27,7 +27,7 @@ import java.util.stream.Stream;
  * Reads a book from wherever a copy is (SPEC §4.6): from this node's files when this node is in its {@code locations},
  * and otherwise from an alive worker of each other node of {@code locations}, in their order. Only a copy whose digest
  * is the book's {@code sha256} counts. With no such copy, the book is lost only if every node of {@code locations} is
- * alive and answered, and unavailable otherwise. A node that gave no answer is not asked again for
+ * alive and answered, and unavailable otherwise. A node whose workers could not be reached is not asked again for
  * {@code TARANTINO_WORKER_TIMEOUT_SECONDS}, so a frozen node costs one timeout and not one per book. It keeps nothing it
  * fetched.
  */
@@ -68,7 +68,7 @@ public class NodeDocumentReader implements DatalakeReader {
             if (answer instanceof DocumentAnswer.Copy(BookText text) && hasDigest(text, stored.get().sha256())) {
                 return new BookLookup.Found(text);
             }
-            everyNodeAnswered &= !(answer instanceof DocumentAnswer.NoAnswer);
+            everyNodeAnswered &= answered(answer);
         }
         return everyNodeAnswered ? new BookLookup.Lost() : new BookLookup.Unavailable();
     }
@@ -83,10 +83,10 @@ public class NodeDocumentReader implements DatalakeReader {
             return readHere(bookId);
         }
         if (silentUntil.getOrDefault(location, Instant.MIN).isAfter(clock.instant())) {
-            return new DocumentAnswer.NoAnswer();
+            return new DocumentAnswer.Unreachable();
         }
         DocumentAnswer answer = askAnAliveWorker(workers, bookId);
-        if (answer instanceof DocumentAnswer.NoAnswer && !workers.isEmpty()) {
+        if (answer instanceof DocumentAnswer.Unreachable && !workers.isEmpty()) {
             silentUntil.put(location, clock.instant().plus(silence));
         }
         return answer;
@@ -101,12 +101,21 @@ public class NodeDocumentReader implements DatalakeReader {
         }
     }
 
+    /** The first worker of the node that says whether it holds the book; unreachable if none could be reached. */
     private DocumentAnswer askAnAliveWorker(List<WorkerAddress> workers, int bookId) {
-        return workers.stream()
-                .map(worker -> peers.fetch(worker, bookId))
-                .filter(answer -> !(answer instanceof DocumentAnswer.NoAnswer))
-                .findFirst()
-                .orElseGet(DocumentAnswer.NoAnswer::new);
+        DocumentAnswer failure = new DocumentAnswer.Unreachable();
+        for (WorkerAddress worker : workers) {
+            DocumentAnswer answer = peers.fetch(worker, bookId);
+            if (answered(answer)) {
+                return answer;
+            }
+            failure = answer instanceof DocumentAnswer.NoAnswer ? answer : failure;
+        }
+        return failure;
+    }
+
+    private static boolean answered(DocumentAnswer answer) {
+        return answer instanceof DocumentAnswer.Copy || answer instanceof DocumentAnswer.NotHere;
     }
 
     private static boolean hasDigest(BookText text, String sha256) {

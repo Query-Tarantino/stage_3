@@ -20,7 +20,8 @@ import java.util.concurrent.TimeoutException;
 /**
  * Asks another worker for a book with {@code GET /internal/documents/{book_id}} (SPEC §6.8), waiting at most
  * {@code TARANTINO_PEER_TIMEOUT_SECONDS} for the whole answer: {@code 200} is a copy, a {@code 404} with
- * {@code BOOK_NOT_FOUND} means that node does not hold it, and anything else, a timeout included, is no answer.
+ * {@code BOOK_NOT_FOUND} means that node does not hold it, any other answer says nothing about this book, and a refused
+ * connection or a timeout means the worker could not be reached.
  */
 public class HttpPeerDocuments implements PeerDocuments {
 
@@ -45,8 +46,10 @@ public class HttpPeerDocuments implements PeerDocuments {
         CompletableFuture<HttpResponse<String>> response = client.sendAsync(request, HttpResponse.BodyHandlers.ofString());
         try {
             return answer(response.get(timeout.toMillis(), TimeUnit.MILLISECONDS), bookId);
-        } catch (ExecutionException | TimeoutException | RuntimeException e) {
+        } catch (ExecutionException | TimeoutException e) {
             response.cancel(true);
+            return new DocumentAnswer.Unreachable();
+        } catch (RuntimeException e) {
             return new DocumentAnswer.NoAnswer();
         } catch (InterruptedException e) {
             response.cancel(true);

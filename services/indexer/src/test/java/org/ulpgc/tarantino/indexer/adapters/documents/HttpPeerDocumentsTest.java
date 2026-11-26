@@ -59,10 +59,14 @@ class HttpPeerDocumentsTest {
     }
 
     @Test
-    void readsAnErrorATimeoutOrAClosedPortAsNoAnswer() throws IOException {
+    void readsAnErrorStatusAsNoAnswerAboutThisBook() {
         assertEquals(new DocumentAnswer.NoAnswer(), peers().fetch(worker, 7));
-        assertEquals(new DocumentAnswer.NoAnswer(), peers().fetch(worker, 11));
-        assertEquals(new DocumentAnswer.NoAnswer(), peers().fetch(new WorkerAddress("n9-w1", "n9", LOOPBACK, closedPort()), 1342));
+    }
+
+    @Test
+    void readsATimeoutOrAClosedPortAsAnUnreachableWorker() throws IOException {
+        assertEquals(new DocumentAnswer.Unreachable(), peers().fetch(worker, 11));
+        assertEquals(new DocumentAnswer.Unreachable(), peers().fetch(new WorkerAddress("n9-w1", "n9", LOOPBACK, closedPort()), 1342));
     }
 
     private static HttpPeerDocuments peers() {

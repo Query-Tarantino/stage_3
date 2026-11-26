@@ -87,7 +87,7 @@ class NodeDocumentReaderTest {
     void isUnavailableWhenAnAliveNodeDoesNotAnswer() {
         locatedOn("n1", "n3");
         answers.put("n1", new DocumentAnswer.Copy(TAMPERED));
-        answers.put("n3", new DocumentAnswer.NoAnswer());
+        answers.put("n3", new DocumentAnswer.Unreachable());
 
         assertEquals(new BookLookup.Unavailable(), reader().lookup(BOOK));
     }
@@ -103,9 +103,9 @@ class NodeDocumentReaderTest {
     }
 
     @Test
-    void asksANodeThatGaveNoAnswerAgainOnlyAfterItsSilence() {
+    void asksAnUnreachableNodeAgainOnlyAfterItsSilence() {
         locatedOn("n1");
-        answers.put("n1", new DocumentAnswer.NoAnswer());
+        answers.put("n1", new DocumentAnswer.Unreachable());
         NodeDocumentReader reader = reader();
 
         assertEquals(new BookLookup.Unavailable(), reader.lookup(BOOK));
@@ -115,6 +115,17 @@ class NodeDocumentReaderTest {
         answers.put("n1", new DocumentAnswer.Copy(TEXT));
         clock.advance(SILENCE.plusSeconds(1));
         assertEquals(new BookLookup.Found(TEXT), reader.lookup(BOOK));
+        assertEquals(List.of("n1", "n1"), asked);
+    }
+
+    @Test
+    void asksAgainANodeWhoseAnswerSaidNothingAboutOneBook() {
+        locatedOn("n1");
+        answers.put("n1", new DocumentAnswer.NoAnswer());
+        NodeDocumentReader reader = reader();
+
+        assertEquals(new BookLookup.Unavailable(), reader.lookup(BOOK));
+        assertEquals(new BookLookup.Unavailable(), reader.lookup(BOOK));
         assertEquals(List.of("n1", "n1"), asked);
     }
 
