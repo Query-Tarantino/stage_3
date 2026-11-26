@@ -26,6 +26,7 @@ import org.ulpgc.tarantino.indexer.commands.BookReader;
 import org.ulpgc.tarantino.indexer.commands.IndexBatchCommand;
 import org.ulpgc.tarantino.indexer.commands.IndexWorker;
 import org.ulpgc.tarantino.indexer.commands.IndexerRole;
+import org.ulpgc.tarantino.indexer.model.book.BookLookup;
 import org.ulpgc.tarantino.indexer.ports.BatchAnnouncer;
 import org.ulpgc.tarantino.indexer.ports.BooksToIndex;
 import org.ulpgc.tarantino.indexer.ports.sources.DatalakeReader;
@@ -76,8 +77,9 @@ public final class IndexerFactory {
         return task -> broker.offer(MessagingContracts.BOOKS_TO_INDEX, task);
     }
 
-    public static DatalakeReader datalakeReader(TarantinoConfig config) {
-        return new BatchBasedDatalakeReader(config.datalake());
+    private static DatalakeReader datalakeReader(TarantinoConfig config) {
+        BatchBasedDatalakeReader node = new BatchBasedDatalakeReader(config.datalake());
+        return bookId -> node.bookText(bookId).<BookLookup>map(BookLookup.Found::new).orElseGet(BookLookup.Lost::new);
     }
 
     private static Tokenizer tokenizer(TarantinoConfig config) {

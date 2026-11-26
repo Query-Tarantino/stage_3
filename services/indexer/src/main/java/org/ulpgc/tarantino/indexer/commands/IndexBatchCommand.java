@@ -11,6 +11,7 @@ import org.ulpgc.tarantino.common.operations.Lease;
 import org.ulpgc.tarantino.common.operations.Transition;
 import org.ulpgc.tarantino.common.operations.TransitionLog;
 import org.ulpgc.tarantino.indexer.model.batch.Batch;
+import org.ulpgc.tarantino.indexer.model.book.BookLookup;
 import org.ulpgc.tarantino.indexer.model.book.ParsedBook;
 import org.ulpgc.tarantino.indexer.model.terms.BatchPostings;
 import org.ulpgc.tarantino.indexer.model.terms.TermPostings;
@@ -103,12 +104,26 @@ public class IndexBatchCommand {
         publish(batch, parsed.stream().map(book -> book.metadata().bookId()).toList());
     }
 
+    /** A book that cannot be read now leaves the batch as unavailable, and one that is gone fails (SPEC §4.6). */
     private Optional<ParsedBook> parse(Batch batch, int bookId, Lease lease) {
-        Optional<ParsedBook> book = reader.read(bookId);
-        if (book.isEmpty()) {
-            failAtIndexing(batch, bookId, lease);
+        return switch (reader.find(bookId)) {
+            case BookLookup.Found found -> Optional.of(reader.parse(found.text()));
+            case BookLookup.Unavailable _ -> {
+                releaseUnreadable(batch, bookId, lease);
+                yield Optional.empty();
+            }
+            case BookLookup.Lost _ -> {
+                failAtIndexing(batch, bookId, lease);
+                yield Optional.empty();
+            }
+        };
+    }
+
+    /** Only while the batch keeps its lease: once it is lost, the job writes nothing else (SPEC §5.1). */
+    private void releaseUnreadable(Batch batch, int bookId, Lease lease) {
+        if (!lease.lost() && batches.releaseUnreadable(batch, bookId)) {
+            log.write(Transition.book(bookId, BookStatus.INDEXING, BookStatus.DOWNLOADED).inBatch(batch.batchId(), batch.generation()));
         }
-        return book;
     }
 
     /** Only while the batch keeps its lease: once it is lost, the job writes nothing else (SPEC §5.1). */
