@@ -13,6 +13,10 @@ fail_usage() {
 }
 
 read_block_flags() {
+    if [[ ! $REPETITIONS =~ ^[1-9][0-9]*$ ]]; then
+        echo "TARANTINO_REPETITIONS must be a positive integer, not $REPETITIONS" >&2
+        exit "$WRONG_USAGE"
+    fi
     while (( $# > 0 )); do
         case $1 in
             --dry-run) dry_run=true ;;
@@ -38,7 +42,9 @@ repetitions() {
     if [[ -n $only_repetition ]]; then
         echo "$only_repetition"
     else
-        seq 1 "$REPETITIONS"
+        for (( repetition = 1; repetition <= REPETITIONS; repetition++ )); do
+            echo "$repetition"
+        done
     fi
 }
 
@@ -48,6 +54,10 @@ require_one_of() {
     for value in "$@"; do
         [[ " $known " == *" $value "* ]] || { echo "Unknown $label $value, expected one of $known" >&2; exit "$WRONG_USAGE"; }
     done
+    if (( $(printf '%s\n' "$@" | sort -u | wc -l) != $# )); then
+        echo "Repeated $label in $*" >&2
+        exit "$WRONG_USAGE"
+    fi
 }
 
 require_designs() {
