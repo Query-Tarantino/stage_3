@@ -1,11 +1,9 @@
 package org.ulpgc.tarantino.indexer.ports.sources;
 
-import org.ulpgc.tarantino.indexer.model.book.BookText;
+import org.ulpgc.tarantino.indexer.model.book.BookLookup;
 
-import java.util.Optional;
-
-/** The datalake as {@code indexer} reads it, which it never writes (SPEC §4.6). */
+/** The documents as {@code indexer} reads them, from wherever a copy is, which it never writes (SPEC §4.6). */
 public interface DatalakeReader {
 
-    Optional<BookText> bookText(int bookId);
+    BookLookup lookup(int bookId);
 }

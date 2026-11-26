@@ -38,6 +38,17 @@ final class Variables {
         return values;
     }
 
+    /** Like {@link #list}, but a variable that is set and blank is an empty list, and only an unset one takes the default. */
+    List<String> listOrEmpty(String name, String defaultValue) {
+        if (!environment.containsKey(name)) {
+            return list(name, defaultValue);
+        }
+        return Arrays.stream(environment.get(name).split(","))
+                .map(String::strip)
+                .filter(value -> !value.isEmpty())
+                .toList();
+    }
+
     int positive(String name, int defaultValue) {
         return optionalText(name).map(value -> positive(name, value)).orElse(defaultValue);
     }

@@ -7,38 +7,40 @@ import org.ulpgc.tarantino.common.messaging.BookTasks;
 import org.ulpgc.tarantino.common.messaging.Broker;
 
 import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
 
 /**
  * The queues and the topic of SPEC §4.2 in Hazelcast. Each queue and the topic are looked up on each use, so it can be
- * built before the client connects.
+ * built before the client connects or the member starts.
  */
 public final class HazelcastBroker implements Broker {
 
-    private final HazelcastInstance client;
+    private final Supplier<HazelcastInstance> instance;
     private final BooleanSupplier connected;
 
-    public HazelcastBroker(HazelcastInstance client, BooleanSupplier connected) {
-        this.client = client;
+    /** {@code instance} gives the client or member on each use, and throws while there is none yet. */
+    public HazelcastBroker(Supplier<HazelcastInstance> instance, BooleanSupplier connected) {
+        this.instance = instance;
         this.connected = connected;
     }
 
     public static HazelcastBroker of(HazelcastConnection connection) {
-        return new HazelcastBroker(connection.client(), connection::connected);
+        return new HazelcastBroker(connection::client, connection::connected);
     }
 
     @Override
     public BookTasks queue(String name) {
-        return new BookTaskQueue(client, name);
+        return new BookTaskQueue(instance.get(), name);
     }
 
     @Override
     public BatchAnnouncements announcements() {
-        return new BatchPublishedTopic(client);
+        return new BatchPublishedTopic(instance.get());
     }
 
     @Override
     public int size(String queue) {
-        return client.getQueue(queue).size();
+        return instance.get().getQueue(queue).size();
     }
 
     @Override
@@ -53,6 +55,6 @@ public final class HazelcastBroker implements Broker {
 
     @Override
     public void close() {
-        client.shutdown();
+        instance.get().shutdown();
     }
 }

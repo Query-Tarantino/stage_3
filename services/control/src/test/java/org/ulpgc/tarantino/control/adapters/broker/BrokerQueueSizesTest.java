@@ -37,7 +37,7 @@ class BrokerQueueSizesTest {
 
     @Test
     void countsTheMessagesWaitingInEachQueue() {
-        BrokerQueueSizes sizes = new BrokerQueueSizes(new HazelcastBroker(member, () -> true));
+        BrokerQueueSizes sizes = new BrokerQueueSizes(new HazelcastBroker(() -> member, () -> true));
         enqueue(MessagingContracts.BOOKS_TO_DOWNLOAD, List.of(1342, 84));
         enqueue(MessagingContracts.BOOKS_TO_INDEX, List.of(11));
 
@@ -47,7 +47,7 @@ class BrokerQueueSizesTest {
 
     @Test
     void countsNothingInEmptyQueues() {
-        BrokerQueueSizes sizes = new BrokerQueueSizes(new HazelcastBroker(member, () -> true));
+        BrokerQueueSizes sizes = new BrokerQueueSizes(new HazelcastBroker(() -> member, () -> true));
 
         assertEquals(0, sizes.downloads());
         assertEquals(0, sizes.index());

@@ -4,6 +4,8 @@ package org.ulpgc.tarantino.common.hazelcast;
 public final class HazelcastContracts {
 
     public static final String DEFAULT_CLUSTER = "tarantino";
+    static final String LOGGING_TYPE = "hazelcast.logging.type";
+    static final String SLF4J = "slf4j";
 
     private HazelcastContracts() {
     }

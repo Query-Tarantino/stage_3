@@ -10,6 +10,7 @@ import org.ulpgc.tarantino.common.operations.Transition;
 import org.ulpgc.tarantino.common.operations.TransitionLog;
 import org.ulpgc.tarantino.common.terms.Tokenizer;
 import org.ulpgc.tarantino.indexer.model.batch.Batch;
+import org.ulpgc.tarantino.indexer.model.book.BookLookup;
 import org.ulpgc.tarantino.indexer.model.book.BookMetadata;
 import org.ulpgc.tarantino.indexer.model.book.BookText;
 import org.ulpgc.tarantino.indexer.model.terms.TermPostings;
@@ -71,6 +72,7 @@ class IndexBatchCommandTest {
         }
     };
     private final Map<Integer, BookText> datalake = new HashMap<>();
+    private final Set<Integer> unavailable = new HashSet<>();
 
     @Test
     void publishesTheClaimedBooksWithTheirMetadataAndPostings() {
@@ -177,6 +179,31 @@ class IndexBatchCommandTest {
     }
 
     @Test
+    void releasesABookItCannotReadNowWithoutFailingItAndPublishesTheRest() {
+        store(1342, "Title: Pride and Prejudice", "pride");
+        batches.downloaded.add(84);
+        unavailable.add(84);
+
+        command().execute(books(1342, 84));
+
+        assertEquals(List.of(84), batches.released);
+        assertEquals(List.of(), batches.failed);
+        assertEquals(Map.of(BATCH_ID, List.of(1342)), batches.published);
+        assertTrue(transitions.contains(Transition.book(84, BookStatus.INDEXING, BookStatus.DOWNLOADED).inBatch(BATCH_ID, 1)));
+    }
+
+    @Test
+    void releasesNoBookOnceItsLeaseIsLost() {
+        batches.downloaded.add(84);
+        unavailable.add(84);
+        leaseLostAfterStep = "open";
+
+        command().execute(books(84));
+
+        assertEquals(List.of(), batches.released);
+    }
+
+    @Test
     void failsNoBookAtIndexingOnceItsLeaseIsLost() {
         batches.downloaded.add(84);
         leaseLostAfterStep = "open";
@@ -242,8 +269,15 @@ class IndexBatchCommandTest {
         return books;
     }
 
+    private BookLookup lookup(int bookId) {
+        if (unavailable.contains(bookId)) {
+            return new BookLookup.Unavailable();
+        }
+        return Optional.ofNullable(datalake.get(bookId)).<BookLookup>map(BookLookup.Found::new).orElseGet(BookLookup.Lost::new);
+    }
+
     private IndexBatchCommand command() {
-        BookReader reader = new BookReader(bookId -> Optional.ofNullable(datalake.get(bookId)), new Tokenizer(Set.of("and")));
+        BookReader reader = new BookReader(this::lookup, new Tokenizer(Set.of("and")));
         return new IndexBatchCommand(batches, reader, writer, this::announce, log, crashPoints, renewal -> {
             this.renewal = renewal;
             return lease;
@@ -260,6 +294,7 @@ class IndexBatchCommandTest {
         private final Set<Integer> downloaded = new HashSet<>();
         private final Set<Integer> indexing = new HashSet<>();
         private final List<Integer> failed = new ArrayList<>();
+        private final List<Integer> released = new ArrayList<>();
         private final Map<String, List<Integer>> published = new HashMap<>();
         private final Set<Integer> marked = new HashSet<>();
         private final Set<Integer> completedByControl = new HashSet<>();
@@ -294,6 +329,12 @@ class IndexBatchCommandTest {
         @Override
         public boolean failAtIndexing(Batch batch, int bookId) {
             failed.add(bookId);
+            return indexing.remove(bookId);
+        }
+
+        @Override
+        public boolean releaseUnreadable(Batch batch, int bookId) {
+            released.add(bookId);
             return indexing.remove(bookId);
         }
 

@@ -23,13 +23,13 @@ import org.ulpgc.tarantino.indexer.adapters.mongo.MongoIndexWriter;
 import org.ulpgc.tarantino.indexer.commands.BookReader;
 import org.ulpgc.tarantino.indexer.commands.IndexBatchCommand;
 import org.ulpgc.tarantino.indexer.model.batch.Batch;
+import org.ulpgc.tarantino.indexer.model.book.BookLookup;
 import org.ulpgc.tarantino.indexer.model.book.BookMetadata;
 import org.ulpgc.tarantino.indexer.model.book.ParsedBook;
 import org.ulpgc.tarantino.indexer.model.terms.BatchPostings;
 import org.ulpgc.tarantino.indexer.model.terms.TermPostings;
 
 import java.util.List;
-import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.Gatherers;
@@ -65,8 +65,8 @@ public class BatchWriteBenchmark {
     public void parseTheBatch() {
         database = MongoDatabases.database(new TemporaryMongoDatabase().uri());
         writer = new MongoIndexWriter(database);
-        BookReader reader = new BookReader(bookId -> Optional.of(BenchmarkBooks.book(bookId)), BenchmarkBooks.tokenizer());
-        List<ParsedBook> parsed = BenchmarkBooks.firstBookIds(books).stream().map(reader::read).flatMap(Optional::stream).toList();
+        BookReader reader = new BookReader(bookId -> new BookLookup.Found(BenchmarkBooks.book(bookId)), BenchmarkBooks.tokenizer());
+        List<ParsedBook> parsed = BenchmarkBooks.firstBookIds(books).stream().map(BenchmarkBooks::book).map(reader::parse).toList();
         metadata = parsed.stream().map(ParsedBook::metadata).toList();
         postingsChunks = BatchPostings.of(parsed.stream()
                         .collect(Collectors.toMap(book -> book.metadata().bookId(), ParsedBook::frequencies)))

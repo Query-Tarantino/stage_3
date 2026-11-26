@@ -37,7 +37,7 @@ public final class HazelcastClients {
     }
 
     static ClientConfig config(List<String> members, String cluster) {
-        ClientConfig config = new ClientConfig().setClusterName(cluster).setProperty("hazelcast.logging.type", "slf4j");
+        ClientConfig config = new ClientConfig().setClusterName(cluster).setProperty(HazelcastContracts.LOGGING_TYPE, HazelcastContracts.SLF4J);
         config.getNetworkConfig().setAddresses(new ArrayList<>(members));
         ClientConnectionStrategyConfig connection = config.getConnectionStrategyConfig()
                 .setAsyncStart(true)

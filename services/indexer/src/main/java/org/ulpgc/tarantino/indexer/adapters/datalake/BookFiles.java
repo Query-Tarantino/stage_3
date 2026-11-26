@@ -9,9 +9,8 @@ import java.nio.file.Path;
 import java.util.Optional;
 
 /**
- * Reads a book's header and body from the datalake, only once both final files exist (SPEC §4.6). A missing header is
- * treated like a missing body, so the book fails with {@code NOT_IN_DATALAKE} (SPEC §4.5) instead of an exception that
- * would drop its whole batch every time it is claimed again.
+ * Reads a book's header and body from this node's datalake, only once both final files exist (SPEC §4.6). A missing
+ * header is treated like a missing body: this node does not hold the book.
  */
 public final class BookFiles {
 

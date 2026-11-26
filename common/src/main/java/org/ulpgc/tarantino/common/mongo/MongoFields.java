@@ -31,6 +31,20 @@ public final class MongoFields {
     public static final String SWITCHED_AT = "switched_at";
     public static final String TARGET_GENERATION = "target_generation";
     public static final String REQUESTED_AT = "requested_at";
+    public static final String NODE = "node";
+    public static final String HOST = "host";
+    public static final String PORT = "port";
+    public static final String DESIGN = "design";
+    public static final String THREADS = "threads";
+    public static final String COMMIT = "commit";
+    public static final String ROLES_ASSIGNED = "roles_assigned";
+    public static final String ROLES_ACTIVE = "roles_active";
+    public static final String ASSIGNMENT = "assignment";
+    public static final String STARTED_AT = "started_at";
+    public static final String ASSIGNED_AT = "assigned_at";
+    public static final String HEARTBEAT_AT = "heartbeat_at";
+    public static final String LOCATIONS = "locations";
+    public static final String SHA256 = "sha256";
 
     private MongoFields() {
     }

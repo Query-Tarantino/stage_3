@@ -103,6 +103,40 @@ class MongoBatchStoreTest {
     }
 
     @Test
+    void releasingAnUnreadableBookAndControlReleasingTheAbandonedBatchAtOnceNeverBothMatch() throws Exception {
+        MongoBatchStore store = store(LEASE);
+        downloaded(1342);
+        Batch batch = store.open(1);
+        store.claim(batch, List.of(1342));
+
+        List<Boolean> released = TwoAtOnce.call(() -> store.releaseUnreadable(batch, 1342), () -> releaseAsControlDoes(batch, 1342));
+
+        assertEquals(1, released.stream().filter(Boolean::booleanValue).count());
+        Document state = state(1342);
+        assertEquals(BookStatus.DOWNLOADED.name(), state.getString(MongoFields.STATUS));
+        assertFalse(state.containsKey(MongoFields.BATCH_ID));
+        assertEquals(1, state.getInteger(MongoFields.GENERATION));
+    }
+
+    @Test
+    void releasesAnUnreadableBookAsUnavailableAndOnlyWhileItIsInTheBatch() throws InterruptedException {
+        MongoBatchStore store = store(LEASE);
+        downloaded(1342);
+        Batch batch = store.open(1);
+        store.claim(batch, List.of(1342));
+
+        Date enqueuedBefore = state(1342).getDate(MongoFields.ENQUEUED_AT);
+        Thread.sleep(Duration.ofMillis(5));
+
+        assertTrue(store.releaseUnreadable(batch, 1342));
+        assertFalse(store.releaseUnreadable(batch, 1342));
+
+        assertEquals(BookErrorCode.DOCUMENT_UNAVAILABLE.name(), state(1342).getString(MongoFields.LAST_ERROR));
+        assertEquals(BookStatus.DOWNLOADED.name(), state(1342).getString(MongoFields.STATUS));
+        assertTrue(state(1342).getDate(MongoFields.ENQUEUED_AT).after(enqueuedBefore));
+    }
+
+    @Test
     void onlyOneOfTwoPublicationsAtOnceMatchesAndBothMarkTheSameBooks() throws Exception {
         MongoBatchStore store = store(LEASE);
         downloaded(1342);
@@ -202,6 +236,15 @@ class MongoBatchStoreTest {
                 .append(MongoFields.ABANDONED_AT, UpdatePipelines.NOW);
         return batches().updateOne(expiredWriting, UpdatePipelines.setThenUnset(change, MongoFields.LEASE_UNTIL))
                 .getMatchedCount() == 1;
+    }
+
+    private boolean releaseAsControlDoes(Batch batch, int bookId) {
+        Bson inTheBatch = Filters.and(Filters.eq(MongoFields.ID, bookId), Filters.eq(MongoFields.STATUS, BookStatus.INDEXING.name()),
+                Filters.eq(MongoFields.BATCH_ID, new ObjectId(batch.batchId())));
+        Document change = new Document(MongoFields.STATUS, BookStatus.DOWNLOADED.name())
+                .append(MongoFields.ENQUEUED_AT, UpdatePipelines.NOW)
+                .append(MongoFields.UPDATED_AT, UpdatePipelines.NOW);
+        return states().updateOne(inTheBatch, UpdatePipelines.setThenUnset(change, MongoFields.BATCH_ID)).getMatchedCount() == 1;
     }
 
     private Document batchDocument(Batch batch) {
