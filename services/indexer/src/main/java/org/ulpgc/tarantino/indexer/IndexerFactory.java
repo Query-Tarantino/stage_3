@@ -46,7 +46,8 @@ public final class IndexerFactory {
     /**
      * The role {@code indexer}: its batch command is built once, reading {@code stopwords.txt} when the worker starts, and
      * each start gives a new batch loop, with its own handle on {@code books-to-index}, on the thread
-     * {@value #BATCH_LOOP_THREAD} (SPEC §2.4 and §13.3).
+     * {@value #BATCH_LOOP_THREAD} (SPEC §2.4 and §13.3). The HTTP client that reads books from other nodes is built with
+     * it and lives as long as the worker, not as one life of the role.
      */
     public static IndexerRole role(TarantinoConfig config, Connections connections) {
         IndexBatchCommand index = indexCommand(config, connections);
