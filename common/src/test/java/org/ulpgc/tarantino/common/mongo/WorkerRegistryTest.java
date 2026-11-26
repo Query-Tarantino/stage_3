@@ -21,6 +21,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class WorkerRegistryTest {
 
@@ -52,14 +53,20 @@ class WorkerRegistryTest {
     }
 
     @Test
-    void aWorkerThatRegistersAgainKeepsTheRolesAssignedSince() {
+    void aWorkerThatRegistersAgainKeepsTheRolesAssignedSinceButStartsAfresh() {
         WorkerRegistry registry = registry();
         registry.register(registration("n1", EVERY_ROLE));
-        workers().updateOne(Filters.eq(MongoFields.ID, "n1-w1"),
-                Updates.combine(Updates.set(MongoFields.ROLES_ASSIGNED, List.of("query")), Updates.set(MongoFields.ASSIGNMENT, 3)));
+        Date longAgo = Date.from(Instant.now().minus(TIMEOUT.multipliedBy(100)));
+        workers().updateOne(Filters.eq(MongoFields.ID, "n1-w1"), Updates.combine(
+                Updates.set(MongoFields.ROLES_ASSIGNED, List.of("query")), Updates.set(MongoFields.ASSIGNMENT, 3),
+                Updates.set(MongoFields.ROLES_ACTIVE, List.of("query")), Updates.set(MongoFields.STARTED_AT, longAgo)));
 
         registry.register(registration("n1", EVERY_ROLE));
 
+        Document worker = workers().find().first();
+        assertNotNull(worker);
+        assertEquals(List.of(), worker.getList(MongoFields.ROLES_ACTIVE, String.class));
+        assertTrue(worker.getDate(MongoFields.STARTED_AT).after(longAgo));
         assertEquals(Optional.of(new Assignment(List.of("query"), 3)), registry.beat("n1-w1", List.of()));
     }
 

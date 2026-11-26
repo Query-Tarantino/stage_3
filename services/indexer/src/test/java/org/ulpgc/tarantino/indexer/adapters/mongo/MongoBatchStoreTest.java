@@ -119,17 +119,21 @@ class MongoBatchStoreTest {
     }
 
     @Test
-    void releasesAnUnreadableBookAsUnavailableAndOnlyWhileItIsInTheBatch() {
+    void releasesAnUnreadableBookAsUnavailableAndOnlyWhileItIsInTheBatch() throws InterruptedException {
         MongoBatchStore store = store(LEASE);
         downloaded(1342);
         Batch batch = store.open(1);
         store.claim(batch, List.of(1342));
+
+        Date enqueuedBefore = state(1342).getDate(MongoFields.ENQUEUED_AT);
+        Thread.sleep(Duration.ofMillis(5));
 
         assertTrue(store.releaseUnreadable(batch, 1342));
         assertFalse(store.releaseUnreadable(batch, 1342));
 
         assertEquals(BookErrorCode.DOCUMENT_UNAVAILABLE.name(), state(1342).getString(MongoFields.LAST_ERROR));
         assertEquals(BookStatus.DOWNLOADED.name(), state(1342).getString(MongoFields.STATUS));
+        assertTrue(state(1342).getDate(MongoFields.ENQUEUED_AT).after(enqueuedBefore));
     }
 
     @Test
