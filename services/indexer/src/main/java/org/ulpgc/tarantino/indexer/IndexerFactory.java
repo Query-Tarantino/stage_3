@@ -8,7 +8,6 @@ import org.ulpgc.tarantino.common.mongo.BookStates;
 import org.ulpgc.tarantino.common.mongo.WorkerRegistry;
 import org.ulpgc.tarantino.common.operations.CrashPoints;
 import org.ulpgc.tarantino.common.operations.LeaseHeartbeat;
-import org.ulpgc.tarantino.common.operations.Replica;
 import org.ulpgc.tarantino.common.operations.TransitionLog;
 import org.ulpgc.tarantino.common.startup.Connections;
 import org.ulpgc.tarantino.common.startup.WorkerThreads;
@@ -30,7 +29,6 @@ import org.ulpgc.tarantino.indexer.commands.BookReader;
 import org.ulpgc.tarantino.indexer.commands.IndexBatchCommand;
 import org.ulpgc.tarantino.indexer.commands.IndexWorker;
 import org.ulpgc.tarantino.indexer.commands.IndexerRole;
-import org.ulpgc.tarantino.indexer.ports.BatchAnnouncer;
 import org.ulpgc.tarantino.indexer.ports.BooksToIndex;
 import org.ulpgc.tarantino.indexer.ports.sources.DatalakeReader;
 
@@ -45,25 +43,28 @@ public final class IndexerFactory {
     private IndexerFactory() {
     }
 
-    /** The role {@code indexer}: each start, a new batch loop on the thread {@value #BATCH_LOOP_THREAD} (SPEC §13.3). */
+    /**
+     * The role {@code indexer}: its batch command is built once, reading {@code stopwords.txt} when the worker starts, and
+     * each start gives a new batch loop, with its own handle on {@code books-to-index}, on the thread
+     * {@value #BATCH_LOOP_THREAD} (SPEC §2.4 and §13.3).
+     */
     public static IndexerRole role(TarantinoConfig config, Connections connections) {
-        return new IndexerRole(() -> indexWorker(config, connections), loop -> WorkerThreads.start(BATCH_LOOP_THREAD, loop));
+        IndexBatchCommand index = indexCommand(config, connections);
+        return new IndexerRole(() -> indexWorker(config, connections.broker(), index), loop -> WorkerThreads.start(BATCH_LOOP_THREAD, loop));
     }
 
-    /** A batch loop over its own handle on {@code books-to-index}, which announces each published batch (SPEC §4.2). */
-    private static IndexWorker indexWorker(TarantinoConfig config, Connections connections) {
-        Broker broker = connections.broker();
-        MongoBatchStore batches = new MongoBatchStore(connections.database(), config.lease(), Replica.name());
+    private static IndexWorker indexWorker(TarantinoConfig config, Broker broker, IndexBatchCommand index) {
         BatchCollector collector = new BatchCollector(new BrokerIndexQueue(broker.queue(MessagingContracts.BOOKS_TO_INDEX)),
                 config.indexBatch(), config.batchTimeout(), Clock.systemUTC());
-        return new IndexWorker(collector, indexCommand(config, connections, batches, broker.announcements()::publish)::execute);
+        return new IndexWorker(collector, index::execute);
     }
 
-    private static IndexBatchCommand indexCommand(TarantinoConfig config, Connections connections, MongoBatchStore batches,
-                                                  BatchAnnouncer announcer) {
+    /** The batch command, whose batches are owned by this worker and announced on {@code published-batches} (SPEC §4.2 and §5.1). */
+    private static IndexBatchCommand indexCommand(TarantinoConfig config, Connections connections) {
+        MongoBatchStore batches = new MongoBatchStore(connections.database(), config.lease(), config.workerId());
         return new IndexBatchCommand(batches, new BookReader(documentReader(config, connections), tokenizer(config)),
-                new MongoIndexWriter(connections.database()), announcer, new TransitionLog(), new CrashPoints(config.crashAt()),
-                renewal -> LeaseHeartbeat.start(config.heartbeat(), renewal));
+                new MongoIndexWriter(connections.database()), connections.broker().announcements()::publish, new TransitionLog(),
+                new CrashPoints(config.crashAt()), renewal -> LeaseHeartbeat.start(config.heartbeat(), renewal));
     }
 
     public static Consumer<Javalin> routes(Connections connections) {
