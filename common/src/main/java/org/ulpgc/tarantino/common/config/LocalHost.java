@@ -27,16 +27,17 @@ final class LocalHost {
         }
     }
 
-    /** The first IPv4 address the host name resolves to. */
-    static String address(String hostName) {
+    /** The first IPv4 address this process's host name resolves to. */
+    static String address() {
         try {
+            String hostName = InetAddress.getLocalHost().getHostName();
             return Arrays.stream(InetAddress.getAllByName(hostName))
                     .filter(Inet4Address.class::isInstance)
                     .map(InetAddress::getHostAddress)
                     .findFirst()
                     .orElseThrow(() -> new InvalidConfigurationException("TARANTINO_ADVERTISE_HOST", "has no default, because " + hostName + " has no IPv4 address"));
         } catch (UnknownHostException e) {
-            throw new InvalidConfigurationException("TARANTINO_ADVERTISE_HOST", "has no default, because " + hostName + " does not resolve");
+            throw new InvalidConfigurationException("TARANTINO_ADVERTISE_HOST", "has no default, because this host's name does not resolve");
         }
     }
 }

@@ -70,7 +70,7 @@ public record TarantinoConfig(
 
     public static TarantinoConfig from(Map<String, String> environment, TarantinoService service) {
         Variables variables = new Variables(environment);
-        String node = variables.text("TARANTINO_NODE", LocalHost.name(environment));
+        String node = variables.optionalText("TARANTINO_NODE").orElseGet(() -> LocalHost.name(environment));
         TarantinoConfig config = new TarantinoConfig(
                 variables.positive("TARANTINO_PORT", service.defaultPort()),
                 variables.optionalPositive("TARANTINO_HTTP_THREADS"),
@@ -114,9 +114,9 @@ public record TarantinoConfig(
         return new WorkerIdentity(workerId, node);
     }
 
-    /** {@code TARANTINO_ADVERTISE_HOST}, or else the IPv4 address that {@code TARANTINO_NODE} resolves to (SPEC §4.7). */
+    /** {@code TARANTINO_ADVERTISE_HOST}, or else the IPv4 address of this process's host name (SPEC §4.7). */
     public String advertisedHost() {
-        return advertiseHost.orElseGet(() -> LocalHost.address(node));
+        return advertiseHost.orElseGet(LocalHost::address);
     }
 
     private void checkInvariants() {
