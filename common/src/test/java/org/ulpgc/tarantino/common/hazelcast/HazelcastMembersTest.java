@@ -2,7 +2,6 @@ package org.ulpgc.tarantino.common.hazelcast;
 
 import com.hazelcast.config.Config;
 import com.hazelcast.config.PartitionGroupConfig;
-import com.hazelcast.core.HazelcastInstance;
 import com.hazelcast.spi.properties.ClusterProperty;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -22,6 +21,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -34,11 +34,11 @@ class HazelcastMembersTest {
     private static final Duration POLL = Duration.ofSeconds(10);
 
     private final String cluster = "test-" + UUID.randomUUID();
-    private final List<HazelcastInstance> members = new ArrayList<>();
+    private final List<EmbeddedMember> members = new ArrayList<>();
 
     @AfterEach
     void shutDown() {
-        members.forEach(HazelcastInstance::shutdown);
+        members.forEach(EmbeddedMember::shutdown);
     }
 
     @Test
@@ -55,33 +55,42 @@ class HazelcastMembersTest {
         assertEquals(PartitionGroupConfig.MemberGroupType.HOST_AWARE, config.getPartitionGroupConfig().getGroupType());
         assertTrue(config.getPartitionGroupConfig().isEnabled());
         assertEquals("7", config.getProperty(ClusterProperty.MAX_NO_HEARTBEAT_SECONDS.getName()));
+        assertEquals("1", config.getProperty(ClusterProperty.HEARTBEAT_INTERVAL_SECONDS.getName()));
+        assertEquals("false", config.getProperty(ClusterProperty.SHUTDOWNHOOK_ENABLED.getName()));
         assertEquals(1, config.getQueueConfig(MessagingContracts.BOOKS_TO_DOWNLOAD).getBackupCount());
         assertEquals(1, config.getQueueConfig(MessagingContracts.BOOKS_TO_INDEX).getBackupCount());
     }
 
     @Test
-    void twoWorkersJoinOneClusterAndShareItsQueues() throws Exception {
+    void twoWorkersStartInTheBackgroundJoinOneClusterAndShareItsQueues() throws Exception {
         int first = freePort();
         int second = freePort();
         List<String> addresses = List.of(LOOPBACK + ":" + first, LOOPBACK + ":" + second);
-        HazelcastInstance n1 = started(worker(first, addresses, "n1"));
-        HazelcastInstance n2 = started(worker(second, addresses, "n2"));
+        EmbeddedMember n1 = started(worker(first, addresses, "n1"));
+        EmbeddedMember n2 = started(worker(second, addresses, "n2"));
 
-        assertEquals(2, n1.getCluster().getMembers().size());
-        Broker offering = HazelcastMembers.broker(n1);
-        Broker taking = HazelcastMembers.broker(n2);
-        assertTrue(taking.connected());
+        Broker offering = n1.broker();
+        Broker taking = n2.broker();
+        assertTrue(within(() -> offering.connected() && taking.connected()));
         try (BookTasks downloads = offering.queue(MessagingContracts.BOOKS_TO_DOWNLOAD);
              BookTasks received = taking.queue(MessagingContracts.BOOKS_TO_DOWNLOAD)) {
             downloads.offer(TASK);
             assertEquals(Optional.of(TASK), received.poll(POLL));
         }
         n2.shutdown();
-        assertFalse(taking.connected());
+        assertTrue(within(() -> !taking.connected()));
     }
 
-    private HazelcastInstance started(TarantinoConfig worker) {
-        HazelcastInstance member = HazelcastMembers.start(worker);
+    private static boolean within(BooleanSupplier condition) throws InterruptedException {
+        Instant deadline = Instant.now().plus(POLL);
+        while (!condition.getAsBoolean() && Instant.now().isBefore(deadline)) {
+            Thread.sleep(Duration.ofMillis(50));
+        }
+        return condition.getAsBoolean();
+    }
+
+    private EmbeddedMember started(TarantinoConfig worker) {
+        EmbeddedMember member = HazelcastMembers.start(worker);
         members.add(member);
         return member;
     }

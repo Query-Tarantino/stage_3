@@ -1,8 +1,8 @@
 package org.ulpgc.tarantino.worker;
 
-import com.hazelcast.core.HazelcastInstance;
 import io.javalin.Javalin;
 import org.ulpgc.tarantino.common.config.TarantinoConfig;
+import org.ulpgc.tarantino.common.hazelcast.EmbeddedMember;
 import org.ulpgc.tarantino.common.hazelcast.HazelcastMembers;
 import org.ulpgc.tarantino.common.model.WorkerRegistration;
 import org.ulpgc.tarantino.common.mongo.MongoDatabases;
@@ -34,23 +34,22 @@ public final class Worker implements AutoCloseable {
     private static final int JAVALIN_MAX_THREADS = 250;
     private static final int BATCH_LOOPS = 1;
 
-    private final HazelcastInstance member;
+    private final EmbeddedMember member;
     private final Javalin app;
     private final Map<String, Role> roles;
     private final ScheduledExecutorService heartbeat;
 
-    private Worker(HazelcastInstance member, Javalin app, Map<String, Role> roles, ScheduledExecutorService heartbeat) {
+    private Worker(EmbeddedMember member, Javalin app, Map<String, Role> roles, ScheduledExecutorService heartbeat) {
         this.member = member;
         this.app = app;
         this.roles = roles;
         this.heartbeat = heartbeat;
     }
 
-    /** Starts the member, opens the HTTP port, registers the worker and starts its first roles (SPEC §2.4 and §13.2). */
+    /** Starts the member in the background, opens the HTTP port, registers the worker and starts its first roles (SPEC §2.4 and §13.2). */
     public static Worker start(TarantinoConfig config) {
-        HazelcastInstance member = HazelcastMembers.start(config);
-        Connections connections = new Connections(config.mongoUri(), MongoDatabases.database(config.mongoUri()),
-                HazelcastMembers.broker(member));
+        EmbeddedMember member = HazelcastMembers.start(config);
+        Connections connections = new Connections(config.mongoUri(), MongoDatabases.database(config.mongoUri()), member.broker());
         Javalin app = Startup.start(config, connections, List.of(),
                 CrawlerFactory.routes(connections).andThen(IndexerFactory.routes(connections)));
         Startup.retry("create the book state indexes", () -> MongoIndexes.ensureStateIndexes(connections.database()));
