@@ -56,8 +56,8 @@ public class DownloadBookCommand {
         claims.claim(task.bookId()).ifPresent(claimId -> executeClaimed(new ClaimedBook(task.bookId(), claimId, task.enqueuedAt())));
     }
 
-    /** The job once the book is claimed, by a message or by “Claim the next book” in mode {@code polling} (SPEC §11.3). */
-    public void executeClaimed(ClaimedBook book) {
+    /** The job once the book of a message is claimed with “Claim a book” (SPEC §5.1). */
+    private void executeClaimed(ClaimedBook book) {
         log.write(Transition.book(book.bookId(), BookStatus.QUEUED, BookStatus.DOWNLOADING).fromMessageEnqueuedAt(book.enqueuedAt()));
         crashPoints.accept(CrashPoint.AFTER_CLAIM);
         try (Lease lease = heartbeats.apply(() -> claims.renew(book.bookId(), book.claimId()))) {

@@ -1,7 +1,6 @@
 package org.ulpgc.tarantino.query;
 
 import io.javalin.Javalin;
-import org.ulpgc.tarantino.common.config.Coordination;
 import org.ulpgc.tarantino.common.config.TarantinoConfig;
 import org.ulpgc.tarantino.common.config.TarantinoService;
 import org.ulpgc.tarantino.common.http.Dependency;
@@ -9,7 +8,6 @@ import org.ulpgc.tarantino.common.http.Health;
 import org.ulpgc.tarantino.common.startup.Connections;
 import org.ulpgc.tarantino.common.startup.Startup;
 import org.ulpgc.tarantino.common.startup.WorkerThreads;
-import org.ulpgc.tarantino.query.adapters.http.SnapshotRefreshRoute;
 import org.ulpgc.tarantino.query.commands.SnapshotRefresher;
 
 import java.util.List;
@@ -29,33 +27,25 @@ public class Main {
         Runnable refresh = WorkerThreads.exitingIfItDies(snapshots::refreshOrKeep);
         Runnable askForRefresh = () -> refresher.execute(refresh);
         Dependency snapshot = new Dependency(Health.SNAPSHOT, () -> snapshots.current().isPresent());
-        Startup.start(config, connections, List.of(snapshot), routes(config, connections, snapshots, askForRefresh));
+        Startup.start(config, connections, List.of(snapshot), routes(config, connections, snapshots));
         refreshOnOneThread(config, connections, refresh, refresher, askForRefresh);
     }
 
     /**
-     * The search routes and, in mode {@code orchestrator}, the internal refresh route (SPEC §11.4). The search routes read
-     * {@code stopwords.txt} only once {@link Startup#start} registers them, so a missing file stops the service with code 1
-     * instead of leaving a JVM without its port (SPEC §2.4).
+     * The search routes, which read {@code stopwords.txt} only once {@link Startup#start} registers them, so a missing
+     * file stops the service with code 1 instead of leaving a JVM without its port (SPEC §2.4).
      */
-    private static Consumer<Javalin> routes(TarantinoConfig config, Connections connections, SnapshotRefresher snapshots,
-                                            Runnable askForRefresh) {
-        Consumer<Javalin> search = app -> QueryFactory.searchRoutes(config, connections, snapshots).register(app);
-        if (config.coordination() != Coordination.ORCHESTRATOR) {
-            return search;
-        }
-        return search.andThen(new SnapshotRefreshRoute(askForRefresh)::register);
+    private static Consumer<Javalin> routes(TarantinoConfig config, Connections connections, SnapshotRefresher snapshots) {
+        return app -> QueryFactory.searchRoutes(config, connections, snapshots).register(app);
     }
 
     /**
-     * At startup, every TARANTINO_SNAPSHOT_SECONDS and, when the mode has a broker and TARANTINO_SNAPSHOT_ON_PUBLISH is
-     * true, on each BatchPublished, which only asks the thread to refresh (SPEC §7 and §11.1).
+     * At startup, every TARANTINO_SNAPSHOT_SECONDS and on each BatchPublished, whose listener only asks the thread to
+     * refresh (SPEC §7).
      */
     private static void refreshOnOneThread(TarantinoConfig config, Connections connections, Runnable refresh,
                                            ScheduledExecutorService refresher, Runnable askForRefresh) {
         refresher.scheduleWithFixedDelay(refresh, 0, config.snapshot().toMillis(), TimeUnit.MILLISECONDS);
-        connections.broker()
-                .filter(broker -> config.snapshotOnPublish())
-                .ifPresent(broker -> broker.announcements().listen(batch -> askForRefresh.run()));
+        connections.broker().announcements().listen(batch -> askForRefresh.run());
     }
 }

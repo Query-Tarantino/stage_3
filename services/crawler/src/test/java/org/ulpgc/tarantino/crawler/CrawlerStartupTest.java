@@ -10,7 +10,6 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 import org.ulpgc.tarantino.common.config.TarantinoConfig;
 import org.ulpgc.tarantino.common.config.TarantinoService;
 import org.ulpgc.tarantino.common.http.TarantinoServer;
-import org.ulpgc.tarantino.common.messaging.Broker;
 import org.ulpgc.tarantino.common.messaging.MessagingContracts;
 import org.ulpgc.tarantino.common.mongo.TemporaryMongoDatabase;
 import org.ulpgc.tarantino.common.startup.Connections;
@@ -50,7 +49,7 @@ class CrawlerStartupTest {
     @AfterEach
     void stop() {
         app.stop();
-        connections.broker().ifPresent(Broker::close);
+        connections.broker().close();
         if (member != null) {
             member.shutdown();
         }
@@ -88,7 +87,7 @@ class CrawlerStartupTest {
 
     private void awaitConnected() throws InterruptedException {
         Instant deadline = Instant.now().plus(CONNECT_DEADLINE);
-        while (!connections.broker().orElseThrow().connected()) {
+        while (!connections.broker().connected()) {
             assertTrue(Instant.now().isBefore(deadline), "The crawler never connected to Hazelcast");
             Thread.sleep(POLL_PAUSE);
         }

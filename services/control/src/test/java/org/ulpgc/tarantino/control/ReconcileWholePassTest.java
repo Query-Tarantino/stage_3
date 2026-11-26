@@ -15,7 +15,6 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 import org.ulpgc.tarantino.common.config.TarantinoConfig;
 import org.ulpgc.tarantino.common.config.TarantinoService;
 import org.ulpgc.tarantino.common.json.TarantinoJson;
-import org.ulpgc.tarantino.common.messaging.Broker;
 import org.ulpgc.tarantino.common.messaging.MessagingContracts;
 import org.ulpgc.tarantino.common.model.BatchStatus;
 import org.ulpgc.tarantino.common.model.BookErrorCode;
@@ -65,7 +64,7 @@ class ReconcileWholePassTest {
     @AfterEach
     void shutDown() {
         if (connections != null) {
-            connections.broker().ifPresent(Broker::close);
+            connections.broker().close();
         }
         if (member != null) {
             member.shutdown();
@@ -215,10 +214,10 @@ class ReconcileWholePassTest {
 
     private void awaitConnected() throws InterruptedException {
         Instant deadline = Instant.now().plus(CONNECT_TIMEOUT);
-        while (!connections.broker().orElseThrow().connected() && Instant.now().isBefore(deadline)) {
+        while (!connections.broker().connected() && Instant.now().isBefore(deadline)) {
             Thread.sleep(100);
         }
-        assertTrue(connections.broker().orElseThrow().connected(), "The Hazelcast client did not connect to the embedded member");
+        assertTrue(connections.broker().connected(), "The Hazelcast client did not connect to the embedded member");
     }
 
     private static Config member(int port) {

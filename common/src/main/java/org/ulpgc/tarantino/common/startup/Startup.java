@@ -16,8 +16,8 @@ import java.util.function.IntConsumer;
 import java.util.stream.Stream;
 
 /**
- * The startup every service shares (SPEC §2.4): it opens the HTTP port first, then retries Mongo and the broker of its
- * mode, if it has one, without limit, so the startup order does not matter. Until they answer, {@code /health} answers {@code 503} and the
+ * The startup every service shares (SPEC §2.4): it opens the HTTP port first, then retries Mongo and Hazelcast without
+ * limit, so the startup order does not matter. Until they answer, {@code /health} answers {@code 503} and the
  * service consumes no queues, because {@link #start} has not returned yet.
  */
 public final class Startup {
@@ -30,7 +30,7 @@ public final class Startup {
     }
 
     /**
-     * Opens the HTTP port, creates the generation pointer (SPEC §5.1) and waits for the broker, if there is one. From here
+     * Opens the HTTP port, creates the generation pointer (SPEC §5.1) and waits for Hazelcast. From here
      * on, an exception that leaves the calling thread, the service's {@code main}, ends the process.
      */
     public static void start(TarantinoConfig config, Connections connections, List<Dependency> serviceDependencies,
@@ -39,7 +39,7 @@ public final class Startup {
         List<Dependency> dependencies = Stream.concat(connections.dependencies().stream(), serviceDependencies.stream()).toList();
         TarantinoServer.start(config, dependencies, routes);
         retry("create the generation pointer", () -> new IndexState(connections.database()).createPointer());
-        connections.broker().ifPresent(broker -> waitFor(broker.name(), broker::connected));
+        waitFor(connections.broker().name(), connections.broker()::connected);
     }
 
     /**

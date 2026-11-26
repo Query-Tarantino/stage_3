@@ -5,7 +5,7 @@ import org.slf4j.LoggerFactory;
 
 import java.time.Clock;
 
-/** Writes the INFO line of SPEC §4.8 for each batch that enters a {@code query} snapshot, from which {@code bench} measures visibility. */
+/** Writes the INFO line of SPEC §4.8 for each batch that enters a {@code query} snapshot, from which {@code bench} measures index freshness (SPEC §9). */
 public class SnapshotLog {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(SnapshotLog.class);

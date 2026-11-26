@@ -9,7 +9,7 @@ import org.ulpgc.tarantino.common.messaging.Broker;
 import java.util.function.BooleanSupplier;
 
 /**
- * The broker of mode {@code hazelcast} (SPEC §4.2). Each queue and the topic are looked up on each use, so it can be
+ * The queues and the topic of SPEC §4.2 in Hazelcast. Each queue and the topic are looked up on each use, so it can be
  * built before the client connects.
  */
 public final class HazelcastBroker implements Broker {

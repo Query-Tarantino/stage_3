@@ -3,8 +3,6 @@ set -uo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../.." || exit 1
 
-source scripts/bench/modes.sh
-
 readonly BENCH_JAR=bench/target/bench-1.0-SNAPSHOT.jar
 readonly RUNS_DIR=benchmarks/runs
 readonly MIRROR_DIR=benchmarks/mirror
@@ -15,11 +13,9 @@ readonly MINIMUM_MEMORY_GIB=15
 readonly BYTES_PER_GIB=$((1024 * 1024 * 1024))
 readonly WRONG_USAGE=2
 readonly OVERRIDING_VARIABLES='^(TARANTINO_.*|JAVA_TOOL_OPTIONS|CRAWLER_CRASH_AT|INDEXER_CRASH_AT)$'
-readonly ROWS=(01 02 03 04 05 06 07 08 09 10 11 12 13 14)
-readonly MIRROR_ROWS=(09 10 11 12)
-readonly DELAY_ROWS=(04 05 12)
-readonly EXPERIMENTS=(ingest-throughput index-throughput resource-usage publication-visibility broker-latency
-    coordination-variants)
+readonly ROWS=(01 02 03 04 05 06 07 08 09 10 11 13 14)
+readonly DELAY_ROWS=(04 05)
+readonly EXPERIMENTS=(ingest-throughput index-throughput resource-usage)
 readonly WITHOUT_JMH=--without-jmh
 
 dry_run=false
@@ -47,27 +43,12 @@ read_flags() {
     done
 }
 
-row_applies() {
-    local mode=$1 row=$2
-    case $mode:$row in
-        polling:04 | polling:05 | polling:12 | orchestrator:12) return 1 ;;
-        *) return 0 ;;
-    esac
-}
-
 replicas_of_row() {
-    local mode=$1 row=$2
-    if [[ $row == 14 ]]; then
+    if [[ $1 == 14 ]]; then
         echo "2 3"
-    elif [[ $mode != hazelcast ]] && is_mirror_row "$row"; then
-        echo "1"
     else
         echo "1 2 3"
     fi
-}
-
-is_mirror_row() {
-    [[ " ${MIRROR_ROWS[*]} " == *" $1 "* ]]
 }
 
 recovery_script() {
@@ -75,13 +56,10 @@ recovery_script() {
 }
 
 recovery_steps() {
-    local mode row replicas
-    for mode in "${MODES[@]}"; do
-        for row in "${ROWS[@]}"; do
-            row_applies "$mode" "$row" || continue
-            for replicas in $(replicas_of_row "$mode" "$row"); do
-                echo "recovery-$mode-$row-r$replicas"
-            done
+    local row replicas
+    for row in "${ROWS[@]}"; do
+        for replicas in $(replicas_of_row "$row"); do
+            echo "recovery-$row-r$replicas"
         done
     done
 }
@@ -99,7 +77,7 @@ command_of() {
     case $step in
         recovery-compare-*) echo "java -jar $BENCH_JAR recovery-compare ${step#recovery-compare-}" ;;
         recovery-summary) echo "recovery summary over every recovery run: bench manifest start, bench recovery-chart, bench manifest finish" ;;
-        recovery-delay) echo "scripts/bench/recovery-delay.sh <the runs of rows ${DELAY_ROWS[*]} in every mode where they apply>" ;;
+        recovery-delay) echo "scripts/bench/recovery-delay.sh <the runs of rows ${DELAY_ROWS[*]}>" ;;
         recovery-*) recovery_command "$step" ;;
         index-throughput) echo "scripts/bench/$step.sh $WITHOUT_JMH" ;;
         *) echo "scripts/bench/$step.sh" ;;
@@ -107,12 +85,8 @@ command_of() {
 }
 
 recovery_command() {
-    local step=${1#recovery-} mode row replicas
-    replicas=${step##*-r}
-    step=${step%-r*}
-    row=${step##*-}
-    mode=${step%-*}
-    echo "TARANTINO_VARIANT=$mode $(recovery_script "$row") $replicas"
+    local step=${1#recovery-}
+    echo "$(recovery_script "${step%-r*}") ${step##*-r}"
 }
 
 fail() {
@@ -176,7 +150,7 @@ recovery_summary() {
 recovery_delay() {
     local runs=() row
     for row in "${DELAY_ROWS[@]}"; do
-        mapfile -t -O "${#runs[@]}" runs < <(grep -E "^recovery-[a-z-]+-$row-r[0-9] 0 " "$runs_txt" | awk '{for (i = 3; i <= NF; i++) print "'"$RUNS_DIR"'/" $i}')
+        mapfile -t -O "${#runs[@]}" runs < <(grep -E "^recovery-$row-r[0-9] 0 " "$runs_txt" | awk '{for (i = 3; i <= NF; i++) print "'"$RUNS_DIR"'/" $i}')
     done
     if (( ${#runs[@]} == 0 )); then
         echo "No recovery run of rows ${DELAY_ROWS[*]} in $runs_txt; using every one in $RUNS_DIR"

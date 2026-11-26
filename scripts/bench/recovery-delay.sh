@@ -9,7 +9,7 @@ readonly WRONG_USAGE=2
 
 state_hypotheses() {
     echo "Machine: the official one, 24 hardware threads, 8 P cores and 16 E cores"
-    echo "Input: recovery runs of rows 04, 05 and 12, with recovery.env: TARANTINO_REQUEUE_SECONDS=10, TARANTINO_RECONCILE_SECONDS=3"
+    echo "Input: recovery runs of rows 04 and 05, with recovery.env: TARANTINO_REQUEUE_SECONDS=10, TARANTINO_RECONCILE_SECONDS=3"
     echo "H1: in hazelcast and activemq, requeue_delay falls between 7 and 13 s"
     echo "H2: reclaim_delay minus requeue_delay has a median under 1.5 s"
     echo "H3: in activemq-persistent there is no requeue and reclaim_delay stays under 10 s"

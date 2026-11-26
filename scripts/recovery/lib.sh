@@ -15,12 +15,9 @@ readonly CRASH_EXIT_CODE=1
 readonly CRASH_EXIT_TIMEOUT_SECONDS=120
 readonly PAUSE_LONGER_THAN_LEASE_SECONDS=10
 readonly WRONG_USAGE=2
-readonly VARIANT="${TARANTINO_VARIANT:-hazelcast}"
+readonly EVERY_PROFILE="*"
 
-source scripts/bench/modes.sh
-
-read -r -a COMPOSE <<< "docker compose $(compose_files "$VARIANT") --env-file scripts/recovery/recovery.env"
-export_profiles_of_mode "$VARIANT"
+COMPOSE=(docker compose -f docker-compose.yml -f docker-compose.mirror.yml --env-file scripts/recovery/recovery.env)
 mapfile -t SERVICES < <("${COMPOSE[@]}" config --services)
 readonly COMPOSE SERVICES
 
@@ -63,23 +60,12 @@ seed_mirror() {
 }
 
 start_stack() {
-    down_every_mode "${COMPOSE[@]}"
+    "${COMPOSE[@]}" --profile "$EVERY_PROFILE" down -v
     "${COMPOSE[@]}" up -d --build --scale "crawler=$replicas" --scale "indexer=$replicas" --scale "query=$replicas"
 }
 
 run_experiment() {
-    if [[ $VARIANT == hazelcast ]]; then
-        echo "recovery-$SCRIPT_NUMBER-r$replicas"
-    else
-        echo "recovery-$SCRIPT_NUMBER-$VARIANT-r$replicas"
-    fi
-}
-
-skip_when_the_claim_is_the_dequeue() {
-    if [[ $VARIANT == polling ]]; then
-        echo "Row $SCRIPT_NUMBER does not apply in mode polling: the claim is the dequeue"
-        exit 0
-    fi
+    echo "recovery-$SCRIPT_NUMBER-r$replicas"
 }
 
 open_run() {

@@ -22,7 +22,6 @@ import org.ulpgc.tarantino.common.mongo.TwoAtOnce;
 import org.ulpgc.tarantino.common.operations.TransitionLog;
 import org.ulpgc.tarantino.crawler.adapters.datalake.batch.BatchBasedDatalakeAdapter;
 import org.ulpgc.tarantino.crawler.adapters.mongo.MongoBookClaims;
-import org.ulpgc.tarantino.crawler.model.ClaimedBook;
 import org.ulpgc.tarantino.crawler.model.failure.DownloadException;
 import org.ulpgc.tarantino.crawler.ports.BookClaims;
 import org.ulpgc.tarantino.crawler.ports.BookDownloader;
@@ -146,11 +145,6 @@ class DownloadBookCommandConcurrencyTest {
 
         private CountedClaims(BookClaims claims) {
             this.claims = claims;
-        }
-
-        @Override
-        public Optional<ClaimedBook> claimNext() {
-            return claims.claimNext();
         }
 
         @Override
