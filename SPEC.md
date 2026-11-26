@@ -113,7 +113,7 @@ The diagram is the same in both index designs. §11 says what changes: where the
 
 | Module | Responsibility | Deployment |
 | --- | --- | --- |
-| `common` | Shared contracts: names, enums, records, JSON, configuration, tokenizer, stopwords, datalake paths, languages, Problem Details, the `book_id` parser, `/health`, the logs of §4.8, crash points and the lease heartbeat; in Mongo, the client, the indexes, the shared writes of §5.1 and the worker registry; in Hazelcast, the member and client factories, the names of §4.2 and the grid types and task of design `grid`; the `Role` contract (§13) | Dependency of the others |
+| `common` | Shared contracts: names, enums, records, JSON, configuration, tokenizer, stopwords, datalake paths, languages, Problem Details, the `book_id` parser, `/health`, the logs of §4.8, crash points and the lease heartbeat; in Mongo, the client, the indexes, the shared writes of §5.1 and the worker registry; in Hazelcast, the member and client factories, the names of §4.2 and the grid types and tasks of design `grid`; the `Role` contract (§13) | Dependency of the others |
 | `services/crawler` | Role `crawler`: consumes `books-to-download`, claims each book, downloads it, stores it on its node, replicates it and enqueues it in `books-to-index`; serves the documents of its node to other workers | Library of `worker` |
 | `services/indexer` | Role `indexer`: groups `books-to-index` into batches, reads each book from a node that holds it, writes the batch into the index of the design and publishes it | Library of `worker` |
 | `services/query` | Role `query`: keeps the index state of the design, a local copy or a snapshot over the grid, answers the search API and reports its readiness | Library of `worker` |
@@ -288,7 +288,7 @@ Every worker embeds a Hazelcast member of the cluster `tarantino`, on port 5701,
 | `published-batches` | Topic | `BatchPublished` | The role `indexer`, when publishing a batch | The role `query` of every worker |
 | `postings-g<n>` | Map, design `grid` | `PostingKey` → `PostingSegment` | The role `indexer` | `TermPostingsTask`, on the member that owns the term |
 | `metadata-g<n>` | Map, design `grid` | `book_id` → `GridBookMetadata` | The role `indexer` | The role `query` |
-| `tarantino-query` | Executor, design `grid` | `TermPostingsTask` | Submitted by the role `query` | Runs on the member that owns each term |
+| `tarantino-query` | Executor, design `grid` | `TermPostingsTask`, `IndexMemoryTask` | Submitted by the role `query`, and by `GET /index/status` on any worker | `TermPostingsTask` on the member that owns each term; `IndexMemoryTask` on every member |
 
 | Record | Content |
 | --- | --- |
@@ -835,7 +835,7 @@ A request with `X-Tarantino-Trace: 1` also gets `X-Tarantino-Computed-By`, the w
 - `index_version`: the version (§7) of all its `PUBLISHED` batches, read from MongoDB: what every ready search instance serves once the batches it is still loading are in.
 - `books_indexed`: books in its `PUBLISHED` batches, the sum of their `book_ids`.
 - `batches_published` and `last_update`: its `PUBLISHED` batches and the `published_at` of the last one, or `null`.
-- `index_size_mb`, in MiB with one decimal. In design `local`, `storageSize` plus `totalIndexSize` of its three collections, from `$collStats`: the shared copy, to which §9 adds the copy in each search instance. In design `grid`, the owned and backup entry memory cost of `postings-g<n>` and `metadata-g<n>` that every member reports to an `IndexMemoryTask` (§4.2), added up, plus `storageSize` and `totalIndexSize` of `batches_g<n>`.
+- `index_size_mb`, in MiB with one decimal. In design `local`, `storageSize` plus `totalIndexSize` of its three collections, from `$collStats`: the shared copy, to which §9 adds the copy in each search instance. In design `grid`, the owned and backup entry memory cost of `postings-g<n>` and `metadata-g<n>` that every member reports to an `IndexMemoryTask` (§4.2), added up, plus `storageSize` and `totalIndexSize` of `batches_g<n>`. It waits at most `TARANTINO_PEER_TIMEOUT_SECONDS` for the results: if a member has not answered by then, `index_size_mb` is `null` and the rest of the answer is unchanged.
 - `degraded`: whether `current.degraded_at` is set (§11.3).
 - `rebuild`: `null` if no rebuild is `RUNNING`; if one is, `{"target_generation": 2, "status": "RUNNING", "books_pending": 1200}`, where `books_pending` counts the books matching the filter in step 4 of §5.4.
 
@@ -894,7 +894,7 @@ It answers `200` when `ready` is true and `503` otherwise, with the same body an
           "metadata_owned": 700, "metadata_backup": 700, "owned_cost_mb": 96.2, "backup_cost_mb": 95.8}}
 ```
 
-`entries` counts the entries of `postings-g<n>`, one per term and batch; `postings` the pairs of term and book inside them; `metadata` the entries of `metadata-g<n>`; `owned` and `backup` say whether this member holds them as owner or as backup. In design `local`, `grid` is `null` and `local` is `{"batches": 28, "entries": 2809440, "postings": 18204881, "books": 2800}`, with the same meaning, for the copy this worker's role `query` holds, or `null` while that role is not active. Summed over the members in design `grid`, or read on any ready instance in design `local`, `entries` equals the `term_count` of the published batches added up and `postings` their `posting_count` (§8.5). With `?term=love` in design `grid`, it adds `"term": {"term": "love", "partition": 113, "owner": "n3-w1", "backups": ["n1-w1"]}`: which member stores that term and where its backups are.
+`entries` counts the entries of `postings-g<n>`, one per term and batch; `postings` the pairs of term and book inside them; `metadata` the entries of `metadata-g<n>`; `owned` and `backup` say whether this member holds them as owner or as backup, and `owned_cost_mb` and `backup_cost_mb` are the `LocalMapStats` of this member that an `IndexMemoryResult` (§4.2) carries. In design `local`, `grid` is `null` and `local` is `{"batches": 28, "entries": 2809440, "postings": 18204881, "books": 2800}`, with the same meaning, for the copy this worker's role `query` holds, or `null` while that role is not active. Summed over the members in design `grid`, or read on any ready instance in design `local`, `entries` equals the `term_count` of the published batches added up and `postings` their `posting_count` (§8.5). With `?term=love` in design `grid`, it adds `"term": {"term": "love", "partition": 113, "owner": "n3-w1", "backups": ["n1-w1"]}`: which member stores that term and where its backups are.
 
 **`GET /internal/time`.** `{"now": "2026-11-21T10:05:02.481Z"}`, the clock of the process. `bench` asks every node at the start and at the end of a run to record its offset from the operator machine (§9).
 
