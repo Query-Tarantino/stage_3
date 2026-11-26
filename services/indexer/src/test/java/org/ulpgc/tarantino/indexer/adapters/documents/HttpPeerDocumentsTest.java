@@ -32,6 +32,7 @@ class HttpPeerDocumentsTest {
                 case "84" -> context.status(404).json(Map.of("status", 404, "code", "BOOK_NOT_FOUND"));
                 case "11" -> Thread.sleep(TIMEOUT.multipliedBy(4));
                 case "2701" -> context.status(404).result("Not found");
+                case "1661" -> context.result("not a document");
                 default -> context.status(500);
             }
         }).start(LOOPBACK, 0);
@@ -59,8 +60,14 @@ class HttpPeerDocumentsTest {
     }
 
     @Test
-    void readsAnErrorStatusAsNoAnswerAboutThisBook() {
+    void readsAnErrorStatusOrABodyThatIsNotADocumentAsNoAnswerAboutThisBook() {
         assertEquals(new DocumentAnswer.NoAnswer(), peers().fetch(worker, 7));
+        assertEquals(new DocumentAnswer.NoAnswer(), peers().fetch(worker, 1661));
+    }
+
+    @Test
+    void readsAnAddressThatIsNotOneAsNoAnswerInsteadOfFailing() {
+        assertEquals(new DocumentAnswer.NoAnswer(), peers().fetch(new WorkerAddress("n9-w1", "n9", "not a host", 7000), 1342));
     }
 
     @Test

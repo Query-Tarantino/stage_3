@@ -39,11 +39,23 @@ public class HttpPeerDocuments implements PeerDocuments {
 
     @Override
     public DocumentAnswer fetch(WorkerAddress worker, int bookId) {
-        HttpRequest request = HttpRequest.newBuilder(URI.create("http://" + worker.host() + ":" + worker.port() + DOCUMENTS_PATH + bookId))
+        CompletableFuture<HttpResponse<String>> response;
+        try {
+            response = client.sendAsync(request(worker, bookId), HttpResponse.BodyHandlers.ofString());
+        } catch (RuntimeException e) {
+            return new DocumentAnswer.NoAnswer();
+        }
+        return await(response, bookId);
+    }
+
+    private HttpRequest request(WorkerAddress worker, int bookId) {
+        return HttpRequest.newBuilder(URI.create("http://" + worker.host() + ":" + worker.port() + DOCUMENTS_PATH + bookId))
                 .timeout(timeout)
                 .GET()
                 .build();
-        CompletableFuture<HttpResponse<String>> response = client.sendAsync(request, HttpResponse.BodyHandlers.ofString());
+    }
+
+    private DocumentAnswer await(CompletableFuture<HttpResponse<String>> response, int bookId) {
         try {
             return answer(response.get(timeout.toMillis(), TimeUnit.MILLISECONDS), bookId);
         } catch (ExecutionException | TimeoutException e) {
