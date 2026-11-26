@@ -71,6 +71,7 @@ class WorkerTest {
         workers().deleteMany(new Document());
 
         assertTrue(within(() -> registered() != null));
+        assertEquals(List.of("indexer"), registered().getList(MongoFields.ROLES_ASSIGNED, String.class));
     }
 
     @Test
