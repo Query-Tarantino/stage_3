@@ -4,18 +4,22 @@ import io.javalin.Javalin;
 import org.ulpgc.tarantino.common.config.TarantinoConfig;
 import org.ulpgc.tarantino.common.hazelcast.EmbeddedMember;
 import org.ulpgc.tarantino.common.hazelcast.HazelcastMembers;
+import org.ulpgc.tarantino.common.model.Assignment;
 import org.ulpgc.tarantino.common.model.WorkerRegistration;
 import org.ulpgc.tarantino.common.mongo.MongoDatabases;
 import org.ulpgc.tarantino.common.mongo.MongoIndexes;
 import org.ulpgc.tarantino.common.mongo.WorkerRegistry;
 import org.ulpgc.tarantino.common.roles.Role;
 import org.ulpgc.tarantino.common.roles.RoleNames;
+import org.ulpgc.tarantino.common.roles.RoleState;
 import org.ulpgc.tarantino.common.startup.Connections;
 import org.ulpgc.tarantino.common.startup.Startup;
 import org.ulpgc.tarantino.common.startup.WorkerThreads;
 import org.ulpgc.tarantino.crawler.CrawlerFactory;
 import org.ulpgc.tarantino.indexer.IndexerFactory;
 
+import java.time.Duration;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -34,6 +38,8 @@ public final class Worker implements AutoCloseable {
     private static final int JAVALIN_MAX_THREADS = 250;
     private static final int BATCH_LOOPS = 1;
 
+    private static final Duration STOP_POLL = Duration.ofMillis(100);
+
     private final EmbeddedMember member;
     private final Javalin app;
     private final Map<String, Role> roles;
@@ -46,7 +52,11 @@ public final class Worker implements AutoCloseable {
         this.heartbeat = heartbeat;
     }
 
-    /** Starts the member in the background, opens the HTTP port, registers the worker and starts its first roles (SPEC §2.4 and §13.2). */
+    /**
+     * Starts the member in the background, opens the HTTP port, waits for MongoDB and Hazelcast, registers the worker and
+     * starts the roles it is assigned: those of an earlier assignment if it registered before, and otherwise those of
+     * {@code TARANTINO_ROLES} (SPEC §2.4 and §13.2).
+     */
     public static Worker start(TarantinoConfig config) {
         EmbeddedMember member = HazelcastMembers.start(config);
         Connections connections = new Connections(config.mongoUri(), MongoDatabases.database(config.mongoUri()), member.broker());
@@ -57,21 +67,38 @@ public final class Worker implements AutoCloseable {
         WorkerRegistry registry = new WorkerRegistry(connections.database());
         WorkerRegistration registration = registration(config);
         Startup.retry("register the worker", () -> registry.register(registration));
-        config.roles().stream().map(roles::get).filter(Objects::nonNull).forEach(Role::start);
+        assignedRoles(registry, registration).stream().map(roles::get).filter(Objects::nonNull).forEach(Role::start);
         return new Worker(member, app, roles, beating(config, new RoleHeartbeat(registry, registration, roles.values())));
     }
 
+    /** Stops the roles and keeps beating until they are stopped, then closes the port and leaves the cluster. */
     @Override
     public void close() {
-        heartbeat.shutdownNow();
         roles.values().forEach(Role::stop);
+        awaitStopped(roles.values());
+        heartbeat.shutdownNow();
         app.stop();
         member.shutdown();
     }
 
+    private static List<String> assignedRoles(WorkerRegistry registry, WorkerRegistration registration) {
+        return registry.beat(registration.identity().workerId(), List.of()).map(Assignment::roles).orElse(registration.roles());
+    }
+
+    private static void awaitStopped(Collection<Role> roles) {
+        while (roles.stream().anyMatch(role -> role.state() != RoleState.STOPPED)) {
+            try {
+                Thread.sleep(STOP_POLL);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+    }
+
     private static WorkerRegistration registration(TarantinoConfig config) {
-        Map<String, Integer> threads = Map.of("http", config.httpThreads().orElse(JAVALIN_MAX_THREADS),
-                "downloads", config.parallelDownloads(), "index", BATCH_LOOPS);
+        Map<String, Integer> threads = Map.of(WorkerRegistration.HTTP_THREADS, config.httpThreads().orElse(JAVALIN_MAX_THREADS),
+                WorkerRegistration.DOWNLOAD_THREADS, config.parallelDownloads(), WorkerRegistration.INDEX_THREADS, BATCH_LOOPS);
         return new WorkerRegistration(config.identity(), config.advertisedHost(), config.port(), config.indexDesign().variableValue(),
                 threads, UNKNOWN_COMMIT, config.roles());
     }

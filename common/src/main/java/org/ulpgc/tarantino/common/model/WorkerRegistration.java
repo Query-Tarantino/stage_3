@@ -9,4 +9,8 @@ import java.util.Map;
  */
 public record WorkerRegistration(WorkerIdentity identity, String host, int port, String design, Map<String, Integer> threads,
                                  String commit, List<String> roles) {
+
+    public static final String HTTP_THREADS = "http";
+    public static final String DOWNLOAD_THREADS = "downloads";
+    public static final String INDEX_THREADS = "index";
 }

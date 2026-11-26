@@ -5,9 +5,11 @@ import org.slf4j.LoggerFactory;
 import org.ulpgc.tarantino.common.model.WorkerRegistration;
 import org.ulpgc.tarantino.common.mongo.WorkerRegistry;
 import org.ulpgc.tarantino.common.roles.Role;
+import org.ulpgc.tarantino.common.roles.RoleNames;
 import org.ulpgc.tarantino.common.roles.RoleState;
 
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.List;
 
 /**
@@ -40,6 +42,10 @@ final class RoleHeartbeat implements Runnable {
     }
 
     private List<String> activeRoles() {
-        return roles.stream().filter(role -> role.state() == RoleState.ACTIVE).map(Role::name).toList();
+        return roles.stream()
+                .filter(role -> role.state() == RoleState.ACTIVE)
+                .map(Role::name)
+                .sorted(Comparator.comparingInt(RoleNames.ALL::indexOf))
+                .toList();
     }
 }
