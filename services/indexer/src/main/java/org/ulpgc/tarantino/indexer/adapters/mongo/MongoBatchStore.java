@@ -45,14 +45,13 @@ import static org.ulpgc.tarantino.common.mongo.MongoFields.PUBLISHED_AT;
 import static org.ulpgc.tarantino.common.mongo.MongoFields.STATUS;
 import static org.ulpgc.tarantino.common.mongo.MongoFields.UPDATED_AT;
 import static org.ulpgc.tarantino.common.mongo.UpdatePipelines.NOW;
+import static org.ulpgc.tarantino.common.mongo.UpdatePipelines.literal;
 import static org.ulpgc.tarantino.common.mongo.UpdatePipelines.nowPlus;
 import static org.ulpgc.tarantino.common.mongo.UpdatePipelines.set;
 import static org.ulpgc.tarantino.common.mongo.UpdatePipelines.setThenUnset;
 
 /** The indexer's conditional writes of SPEC §5.1 on {@code batches_g<n>} and {@code book_states}. */
 public class MongoBatchStore implements BatchStore {
-
-    private static final String LITERAL = "$literal";
 
     private final MongoDatabase database;
     private final MongoCollection<Document> states;
@@ -87,7 +86,7 @@ public class MongoBatchStore implements BatchStore {
                 .append(CLAIM_ID, batch.claimId())
                 .append(OWNER, owner)
                 .append(LEASE_UNTIL, nowPlus(lease))
-                .append(BOOK_IDS, new Document(LITERAL, List.of()))
+                .append(BOOK_IDS, literal(List.of()))
                 .append(OPENED_AT, NOW);
         batches(batch).updateOne(Filters.eq(ID, id(batch)), set(change), new UpdateOptions().upsert(true));
         return batch;
@@ -138,7 +137,7 @@ public class MongoBatchStore implements BatchStore {
     public Optional<Instant> publish(Batch batch, List<Integer> bookIds) {
         Document change = new Document(STATUS, BatchStatus.PUBLISHED.name())
                 .append(PUBLISHED_AT, NOW)
-                .append(BOOK_IDS, new Document(LITERAL, bookIds));
+                .append(BOOK_IDS, literal(bookIds));
         Bson writingWithLease = Filters.and(writing(batch), Filters.expr(new Document("$gt", List.of("$" + LEASE_UNTIL, NOW))));
         return Optional.ofNullable(batches(batch).findOneAndUpdate(writingWithLease, setThenUnset(change, LEASE_UNTIL),
                         new FindOneAndUpdateOptions().returnDocument(ReturnDocument.AFTER)))

@@ -31,6 +31,7 @@ import static org.ulpgc.tarantino.common.mongo.MongoFields.STARTED_AT;
 import static org.ulpgc.tarantino.common.mongo.MongoFields.THREADS;
 import static org.ulpgc.tarantino.common.mongo.UpdatePipelines.NOW;
 import static org.ulpgc.tarantino.common.mongo.UpdatePipelines.ifNull;
+import static org.ulpgc.tarantino.common.mongo.UpdatePipelines.literal;
 import static org.ulpgc.tarantino.common.mongo.UpdatePipelines.set;
 
 /**
@@ -39,7 +40,6 @@ import static org.ulpgc.tarantino.common.mongo.UpdatePipelines.set;
  */
 public class WorkerRegistry {
 
-    private static final String LITERAL = "$literal";
     private static final int FIRST_ASSIGNMENT = 1;
 
     private final MongoCollection<Document> workers;
@@ -54,12 +54,12 @@ public class WorkerRegistry {
                 .append(HOST, registration.host())
                 .append(PORT, registration.port())
                 .append(DESIGN, registration.design())
-                .append(THREADS, new Document(LITERAL, new Document(registration.threads())))
+                .append(THREADS, literal(new Document(registration.threads())))
                 .append(COMMIT, registration.commit())
                 .append(STARTED_AT, NOW)
                 .append(HEARTBEAT_AT, NOW)
-                .append(ROLES_ACTIVE, new Document(LITERAL, List.of()))
-                .append(ROLES_ASSIGNED, ifNull(ROLES_ASSIGNED, new Document(LITERAL, registration.roles())))
+                .append(ROLES_ACTIVE, literal(List.of()))
+                .append(ROLES_ASSIGNED, ifNull(ROLES_ASSIGNED, literal(registration.roles())))
                 .append(ASSIGNMENT, ifNull(ASSIGNMENT, FIRST_ASSIGNMENT))
                 .append(ASSIGNED_AT, ifNull(ASSIGNED_AT, NOW));
         workers.updateOne(Filters.eq(ID, registration.identity().workerId()), set(change), new UpdateOptions().upsert(true));
@@ -67,7 +67,7 @@ public class WorkerRegistry {
 
     /** “Beat as a worker”: the assignment of this moment, or empty if the worker has no document and must register again. */
     public Optional<Assignment> beat(String workerId, List<String> activeRoles) {
-        Document change = new Document(HEARTBEAT_AT, NOW).append(ROLES_ACTIVE, new Document(LITERAL, activeRoles));
+        Document change = new Document(HEARTBEAT_AT, NOW).append(ROLES_ACTIVE, literal(activeRoles));
         return Optional.ofNullable(workers.findOneAndUpdate(Filters.eq(ID, workerId), set(change),
                         new FindOneAndUpdateOptions().returnDocument(ReturnDocument.AFTER)))
                 .map(worker -> new Assignment(worker.getList(ROLES_ASSIGNED, String.class), worker.getInteger(ASSIGNMENT)));

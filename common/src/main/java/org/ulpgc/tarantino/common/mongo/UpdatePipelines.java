@@ -23,6 +23,11 @@ public final class UpdatePipelines {
         return new Document("$add", List.of(NOW, duration.toMillis()));
     }
 
+    /** {@code {$literal: value}}: a value a pipeline must not read as a field path or an expression, such as a list. */
+    public static Document literal(Object value) {
+        return new Document("$literal", value);
+    }
+
     public static List<Document> set(Document fields) {
         return List.of(new Document("$set", fields));
     }
