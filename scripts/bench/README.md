@@ -56,10 +56,15 @@ To run fewer trials while developing a script, never for an official run:
 TARANTINO_DESIGNS=local TARANTINO_CONFIGURATIONS="W1 W2" TARANTINO_REPETITIONS=1 TARANTINO_CLIENTS_LIST=8 scripts/bench/design-comparison.sh
 ```
 
+`bench comparison` reads the runs of block `comparison` and writes a run of its own:
+
+```bash
+java -jar bench/target/bench-1.0-SNAPSHOT.jar comparison benchmarks/runs/<run_id>…
+```
+
 To summarise an existing run again, delete its `summary.csv` and run its command on the run folder:
 
 ```bash
-java -jar bench/target/bench-1.0-SNAPSHOT.jar comparison benchmarks/runs/<run_id>
 java -jar bench/target/bench-1.0-SNAPSHOT.jar freshness benchmarks/runs/<run_id>
 java -jar bench/target/bench-1.0-SNAPSHOT.jar trace benchmarks/runs/<run_id>
 java -jar bench/target/bench-1.0-SNAPSHOT.jar matrix benchmarks/runs/<run_id>
