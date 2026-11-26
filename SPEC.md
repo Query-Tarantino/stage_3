@@ -1104,7 +1104,7 @@ What cannot be equal is the design itself. These differences are listed in the r
 
 In `W1` a book has one copy and a partition no backup, because there is one node: it measures the cost of one instance, not a redundant design. The professors accept a one-node baseline (November 24). `W2`, `W3` and `W4` are the three scaling configurations by machines the PDF asks for besides it (PDF §4.1), and `W2P4` puts the instances of `W4` on two computers, which separates what more processes give from what the network costs: the professors warn that the lab network is slow.
 
-**Experiments.** Each one is a script that deploys what it needs, measures and writes its own run. Each script in `scripts/bench/` and `scripts/chaos/` also takes `--dry-run`, which prints its hypotheses, or its expected behaviour (§8.3), and the trials or steps it would run, and runs nothing.
+**Experiments.** Each one is a script that deploys what it needs, measures and writes its own run. Each experiment's script in `scripts/bench/`, and each `scripts/chaos/<scenario>.sh`, also takes `--dry-run`, which prints its hypotheses, or its expected behaviour (§8.3), and the trials or steps it would run, and runs nothing.
 
 | Experiment | Script | Owner | Runs on | Measures (PDF §4.2) |
 | --- | --- | --- | --- | --- |
