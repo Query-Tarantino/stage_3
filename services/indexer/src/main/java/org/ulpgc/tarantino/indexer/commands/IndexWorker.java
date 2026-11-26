@@ -35,7 +35,16 @@ public class IndexWorker implements Runnable {
                 indexNextBatchOrPause();
             }
         } finally {
+            closeQueueHandle();
+        }
+    }
+
+    /** A handle that fails to close leaves its messages to Hazelcast, which gives them back by itself (SPEC §4.2). */
+    private void closeQueueHandle() {
+        try {
             collector.close();
+        } catch (RuntimeException e) {
+            LOGGER.warn("Could not close the queue handle of a batch loop", e);
         }
     }
 

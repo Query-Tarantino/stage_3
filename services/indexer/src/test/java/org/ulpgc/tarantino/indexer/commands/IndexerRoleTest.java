@@ -34,6 +34,8 @@ class IndexerRoleTest {
 
     private final List<FakeQueue> queues = new CopyOnWriteArrayList<>();
     private final List<Thread> threads = new CopyOnWriteArrayList<>();
+    private final List<Throwable> deaths = new CopyOnWriteArrayList<>();
+    private boolean failingClose;
 
     @Test
     void startsAndStopsTwiceInOneProcessWithANewQueueHandleEachTime() {
@@ -51,6 +53,7 @@ class IndexerRoleTest {
 
         assertEquals(2, queues.size());
         queues.forEach(queue -> assertTrue(queue.closed.get()));
+        queues.forEach(queue -> assertFalse(queue.polledAfterClose.get()));
         threads.forEach(thread -> assertTrue(within(() -> !thread.isAlive())));
     }
 
@@ -80,6 +83,21 @@ class IndexerRoleTest {
     }
 
     @Test
+    void stopsEvenWhenItsQueueHandleFailsToClose() {
+        failingClose = true;
+        IndexerRole role = role(books -> {
+        });
+        role.start();
+        assertTrue(within(() -> queues.getFirst().polls.get() > 0));
+
+        role.stop();
+
+        assertTrue(within(() -> role.state() == RoleState.STOPPED));
+        assertTrue(within(() -> threads.stream().noneMatch(Thread::isAlive)));
+        assertEquals(List.of(), deaths);
+    }
+
+    @Test
     void staysStoppedWhenItsBatchLoopCannotBeBuilt() {
         IndexerRole role = new IndexerRole(() -> {
             throw new IllegalStateException("No stopwords.txt");
@@ -91,11 +109,11 @@ class IndexerRoleTest {
 
     private IndexerRole role(Consumer<Map<Integer, Instant>> index, BookTask... tasks) {
         return new IndexerRole(() -> {
-            FakeQueue queue = new FakeQueue(queues.isEmpty() ? List.of(tasks) : List.of());
+            FakeQueue queue = new FakeQueue(queues.isEmpty() ? List.of(tasks) : List.of(), failingClose);
             queues.add(queue);
             return new IndexWorker(new BatchCollector(queue, 1, POLL, Clock.systemUTC()), index);
         }, loop -> {
-            Thread thread = Thread.ofPlatform().start(loop);
+            Thread thread = Thread.ofPlatform().uncaughtExceptionHandler((dead, death) -> deaths.add(death)).start(loop);
             threads.add(thread);
             return thread;
         });
@@ -131,14 +149,17 @@ class IndexerRoleTest {
         private final AtomicInteger polls = new AtomicInteger();
         private final AtomicInteger acknowledged = new AtomicInteger();
         private final AtomicBoolean closed = new AtomicBoolean();
+        private final AtomicBoolean polledAfterClose = new AtomicBoolean();
+        private final boolean failingClose;
 
-        private FakeQueue(List<BookTask> tasks) {
+        private FakeQueue(List<BookTask> tasks, boolean failingClose) {
             this.tasks = new ConcurrentLinkedQueue<>(tasks);
+            this.failingClose = failingClose;
         }
 
         @Override
         public Optional<BookTask> next(Duration wait) throws InterruptedException {
-            assertFalse(closed.get());
+            polledAfterClose.compareAndSet(false, closed.get());
             polls.incrementAndGet();
             BookTask task = tasks.poll();
             if (task == null) {
@@ -164,6 +185,9 @@ class IndexerRoleTest {
         @Override
         public void close() {
             closed.set(true);
+            if (failingClose) {
+                throw new IllegalStateException("Hazelcast does not answer");
+            }
         }
     }
 }

@@ -65,7 +65,11 @@ public class IndexerRole implements Role {
         try {
             life.run();
         } finally {
-            state = RoleState.STOPPED;
+            markStopped();
         }
+    }
+
+    private synchronized void markStopped() {
+        state = RoleState.STOPPED;
     }
 }
