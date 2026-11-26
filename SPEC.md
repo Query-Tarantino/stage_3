@@ -36,7 +36,7 @@ What the cluster still depends on when every application service is replicated i
 
 ### 1.1 Terms
 
-Each term means only this, here and in every `CLAUDE.md`.
+Each term means only this, here and in the team's notes.
 
 | Term | Meaning |
 | --- | --- |
