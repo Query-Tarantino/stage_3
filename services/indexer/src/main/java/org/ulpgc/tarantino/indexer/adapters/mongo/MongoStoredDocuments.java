@@ -6,8 +6,8 @@ import com.mongodb.client.model.Filters;
 import com.mongodb.client.model.Projections;
 import org.bson.Document;
 import org.ulpgc.tarantino.common.mongo.MongoCollections;
-import org.ulpgc.tarantino.indexer.adapters.documents.StoredDocument;
-import org.ulpgc.tarantino.indexer.adapters.documents.StoredDocuments;
+import org.ulpgc.tarantino.indexer.ports.sources.StoredDocument;
+import org.ulpgc.tarantino.indexer.ports.sources.StoredDocuments;
 
 import java.util.List;
 import java.util.Optional;

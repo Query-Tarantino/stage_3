@@ -86,7 +86,7 @@ public final class IndexerFactory {
         WorkerRegistry registry = new WorkerRegistry(connections.database());
         return new NodeDocumentReader(config.node(), new BatchBasedDatalakeReader(config.datalake()),
                 new MongoStoredDocuments(connections.database()), () -> registry.alive(config.workerTimeout()),
-                new HttpPeerDocuments(config.peerTimeout()));
+                new HttpPeerDocuments(config.peerTimeout()), Clock.systemUTC(), config.workerTimeout());
     }
 
     private static Tokenizer tokenizer(TarantinoConfig config) {

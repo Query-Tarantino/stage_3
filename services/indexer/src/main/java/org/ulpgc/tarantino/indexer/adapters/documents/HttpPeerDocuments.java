@@ -4,6 +4,8 @@ import org.ulpgc.tarantino.common.json.TarantinoJson;
 import org.ulpgc.tarantino.common.model.ProblemCode;
 import org.ulpgc.tarantino.common.model.WorkerAddress;
 import org.ulpgc.tarantino.indexer.model.book.BookText;
+import org.ulpgc.tarantino.indexer.ports.sources.DocumentAnswer;
+import org.ulpgc.tarantino.indexer.ports.sources.PeerDocuments;
 
 import java.net.URI;
 import java.net.http.HttpClient;

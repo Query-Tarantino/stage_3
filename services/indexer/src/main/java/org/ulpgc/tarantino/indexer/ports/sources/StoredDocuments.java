@@ -1,4 +1,4 @@
-package org.ulpgc.tarantino.indexer.adapters.documents;
+package org.ulpgc.tarantino.indexer.ports.sources;
 
 import java.util.Optional;
 

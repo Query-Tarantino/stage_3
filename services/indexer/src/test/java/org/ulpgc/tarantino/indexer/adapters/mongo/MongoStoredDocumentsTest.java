@@ -8,7 +8,7 @@ import org.ulpgc.tarantino.common.mongo.MongoCollections;
 import org.ulpgc.tarantino.common.mongo.MongoDatabases;
 import org.ulpgc.tarantino.common.mongo.MongoFields;
 import org.ulpgc.tarantino.common.mongo.TemporaryMongoDatabase;
-import org.ulpgc.tarantino.indexer.adapters.documents.StoredDocument;
+import org.ulpgc.tarantino.indexer.ports.sources.StoredDocument;
 
 import java.util.List;
 import java.util.Optional;

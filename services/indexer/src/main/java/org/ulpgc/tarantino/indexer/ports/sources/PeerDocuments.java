@@ -1,4 +1,4 @@
-package org.ulpgc.tarantino.indexer.adapters.documents;
+package org.ulpgc.tarantino.indexer.ports.sources;
 
 import org.ulpgc.tarantino.common.model.WorkerAddress;
 

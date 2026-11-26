@@ -6,6 +6,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.ulpgc.tarantino.common.model.WorkerAddress;
 import org.ulpgc.tarantino.indexer.model.book.BookText;
+import org.ulpgc.tarantino.indexer.ports.sources.DocumentAnswer;
 
 import java.io.IOException;
 import java.net.ServerSocket;

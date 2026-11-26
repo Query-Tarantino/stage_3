@@ -8,9 +8,18 @@ import org.ulpgc.tarantino.common.model.WorkerAddress;
 import org.ulpgc.tarantino.indexer.adapters.datalake.batch.BatchBasedDatalakeReader;
 import org.ulpgc.tarantino.indexer.model.book.BookLookup;
 import org.ulpgc.tarantino.indexer.model.book.BookText;
+import org.ulpgc.tarantino.indexer.ports.sources.DocumentAnswer;
+import org.ulpgc.tarantino.indexer.ports.sources.PeerDocuments;
+import org.ulpgc.tarantino.indexer.ports.sources.StoredDocument;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -25,6 +34,7 @@ class NodeDocumentReaderTest {
     private static final BookText TEXT = new BookText(BOOK, "Title: Pride and Prejudice\n", "It is a truth universally acknowledged");
     private static final BookText TAMPERED = new BookText(BOOK, TEXT.header(), TEXT.body() + ".");
     private static final String SHA256 = DocumentDigest.of(TEXT.header(), TEXT.body());
+    private static final Duration SILENCE = Duration.ofSeconds(10);
 
     @TempDir
     Path datalake;
@@ -33,6 +43,7 @@ class NodeDocumentReaderTest {
     private final List<WorkerAddress> alive = new ArrayList<>(List.of(worker("n1"), worker("n2"), worker("n3"), worker("n4")));
     private final Map<String, DocumentAnswer> answers = new HashMap<>();
     private final List<String> asked = new ArrayList<>();
+    private final MutableClock clock = new MutableClock();
 
     @Test
     void readsHereWhenThisNodeHoldsAGoodCopy() throws IOException {
@@ -92,6 +103,32 @@ class NodeDocumentReaderTest {
     }
 
     @Test
+    void asksANodeThatGaveNoAnswerAgainOnlyAfterItsSilence() {
+        locatedOn("n1");
+        answers.put("n1", new DocumentAnswer.NoAnswer());
+        NodeDocumentReader reader = reader();
+
+        assertEquals(new BookLookup.Unavailable(), reader.lookup(BOOK));
+        assertEquals(new BookLookup.Unavailable(), reader.lookup(BOOK));
+        assertEquals(List.of("n1"), asked);
+
+        answers.put("n1", new DocumentAnswer.Copy(TEXT));
+        clock.advance(SILENCE.plusSeconds(1));
+        assertEquals(new BookLookup.Found(TEXT), reader.lookup(BOOK));
+        assertEquals(List.of("n1", "n1"), asked);
+    }
+
+    @Test
+    void isUnavailableRatherThanLostWhenItsCopyHereCannotBeRead() throws IOException {
+        locatedOn("n2");
+        DatalakePaths paths = new DatalakePaths(datalake);
+        Files.createDirectories(paths.header(BOOK));
+        DatalakePaths.writeAtomically(paths.body(BOOK), TEXT.body());
+
+        assertEquals(new BookLookup.Unavailable(), reader().lookup(BOOK));
+    }
+
+    @Test
     void isLostWhenTheBookHasNoState() {
         assertEquals(new BookLookup.Lost(), reader().lookup(BOOK));
     }
@@ -102,7 +139,7 @@ class NodeDocumentReaderTest {
             return answers.getOrDefault(worker.node(), new DocumentAnswer.NotHere());
         };
         return new NodeDocumentReader("n2", new BatchBasedDatalakeReader(datalake), bookId -> Optional.ofNullable(stored.get(bookId)),
-                () -> List.copyOf(alive), peers);
+                () -> List.copyOf(alive), peers, clock, SILENCE);
     }
 
     private void locatedOn(String... nodes) {
@@ -113,6 +150,30 @@ class NodeDocumentReaderTest {
         DatalakePaths paths = new DatalakePaths(datalake);
         DatalakePaths.writeAtomically(paths.header(BOOK), text.header());
         DatalakePaths.writeAtomically(paths.body(BOOK), text.body());
+    }
+
+    private static final class MutableClock extends Clock {
+
+        private Instant now = Instant.parse("2026-11-26T10:00:00Z");
+
+        void advance(Duration duration) {
+            now = now.plus(duration);
+        }
+
+        @Override
+        public ZoneId getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(ZoneId zone) {
+            return this;
+        }
+
+        @Override
+        public Instant instant() {
+            return now;
+        }
     }
 
     private static WorkerAddress worker(String node) {
