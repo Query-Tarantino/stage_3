@@ -17,11 +17,11 @@ fail_usage() {
 state_hypotheses() {
     case $1 in
         local)
-            echo "H1: index_freshness has a p50 of 100 to 400 ms and a p95 under 1 s: after BatchPublished every instance reads the batch's postings, about 6,000 one-posting documents for one book, and its metadata from MongoDB, which load_ms of its snapshot line shows, before its state changes"
+            echo "H1: index_freshness has a p50 of 100 to 400 ms and a p95 under 1 s: after BatchPublished every instance reads the batch's postings, about 6,000 one-posting documents for one book, and its metadata from MongoDB, which load_ms of its snapshot line shows, before its state changes. Stage 2 has no measure of this case, because its query never loaded postings"
             echo "H2: index_freshness_all has a p95 under 1.5 s, the slowest of the four instances to load"
             ;;
         grid)
-            echo "H1: index_freshness has a p50 of 20 to 60 ms and a p95 under 150 ms: the entries are in the grid before the batch is published, so an instance only reads the batch document and the book's metadata entry, and load_ms is 0"
+            echo "H1: index_freshness has a p50 of 20 to 60 ms and a p95 under 150 ms: the entries are in the grid before the batch is published, so an instance only reads the batch document and the book's metadata entry, and load_ms is 0. Stage 2's query, which also read only batch ids on a refresh, showed a batch 37 ms after BatchPublished at p50 and 54 ms at p95, plus here the 10 ms of the polling"
             echo "H2: index_freshness_all has a p95 under 200 ms"
             ;;
     esac
