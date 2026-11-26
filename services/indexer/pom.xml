@@ -12,10 +12,6 @@
 
     <artifactId>indexer</artifactId>
 
-    <properties>
-        <exec.mainClass>org.ulpgc.tarantino.indexer.Main</exec.mainClass>
-    </properties>
-
     <dependencies>
         <dependency>
             <groupId>org.ulpgc.tarantino</groupId>
@@ -47,14 +43,5 @@
             <scope>test</scope>
         </dependency>
     </dependencies>
-
-    <build>
-        <plugins>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-shade-plugin</artifactId>
-            </plugin>
-        </plugins>
-    </build>
 
 </project>
