@@ -30,16 +30,17 @@ public final class Startup {
     }
 
     /**
-     * Opens the HTTP port, creates the generation pointer (SPEC §5.1) and waits for Hazelcast. From here
+     * Opens the HTTP port, creates the generation pointer (SPEC §5.1), waits for Hazelcast and returns the server. From here
      * on, an exception that leaves the calling thread, the service's {@code main}, ends the process.
      */
-    public static void start(TarantinoConfig config, Connections connections, List<Dependency> serviceDependencies,
-                             Consumer<Javalin> routes) {
+    public static Javalin start(TarantinoConfig config, Connections connections, List<Dependency> serviceDependencies,
+                                Consumer<Javalin> routes) {
         exitIfThisThreadFails(Runtime.getRuntime()::halt);
         List<Dependency> dependencies = Stream.concat(connections.dependencies().stream(), serviceDependencies.stream()).toList();
-        TarantinoServer.start(config, dependencies, routes);
+        Javalin app = TarantinoServer.start(config, dependencies, routes);
         retry("create the generation pointer", () -> new IndexState(connections.database()).createPointer());
         waitFor(connections.broker().name(), connections.broker()::connected);
+        return app;
     }
 
     /**
