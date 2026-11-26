@@ -39,6 +39,7 @@ is_repetition() {
 }
 
 repetitions() {
+    local repetition
     if [[ -n $only_repetition ]]; then
         echo "$only_repetition"
     else
@@ -49,6 +50,10 @@ repetitions() {
 }
 
 require_one_of() {
+    if (( $# < 3 )); then
+        echo "No $1 given" >&2
+        exit "$WRONG_USAGE"
+    fi
     local label=$1 known=$2 value
     shift 2
     for value in "$@"; do
