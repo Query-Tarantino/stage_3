@@ -59,7 +59,7 @@ TARANTINO_DESIGNS=local TARANTINO_CONFIGURATIONS="W1 W2" TARANTINO_REPETITIONS=1
 To summarise an existing run again, delete its `summary.csv` and run its command on the run folder:
 
 ```bash
-java -jar bench/target/bench-1.0-SNAPSHOT.jar comparison benchmarks/runs/<run_id>
+java -jar bench/target/bench-1.0-SNAPSHOT.jar comparison benchmarks/runs/<run_id>…
 java -jar bench/target/bench-1.0-SNAPSHOT.jar freshness benchmarks/runs/<run_id>
 java -jar bench/target/bench-1.0-SNAPSHOT.jar trace benchmarks/runs/<run_id>
 java -jar bench/target/bench-1.0-SNAPSHOT.jar matrix benchmarks/runs/<run_id>

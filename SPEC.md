@@ -176,7 +176,7 @@ stage_3/
 │   └── images.sh, sync-mirror.sh, deploy.sh, status.sh, collect.sh, teardown.sh, bench.sh, checks.sh
 ├── scripts/
 │   ├── fill_cache.sh
-│   ├── bench/<experiment>.sh, trials.sh, all.sh
+│   ├── bench/<experiment>.sh, trials.sh, comparison-block.sh, all.sh
 │   ├── chaos/<scenario>.sh, lib.sh, kill-node.sh, restore-node.sh, pause-node.sh, resume-node.sh,
 │   │   kill-process.sh, start-process.sh
 │   └── recovery/<nn>-<row>.sh, lib.sh, recovery.env
@@ -193,7 +193,7 @@ stage_3/
 | `services/query`, `cluster/gateway/`, `cluster/consul/`, `api/openapi.yaml`, `checks/` | C |
 | `services/control`, `scripts/chaos/`, `scripts/recovery/` | D |
 | `bench/` | C, the load generator and the routing and health tools; D, the shared part, the oracle, the network, availability, integrity, matrix and recovery-delay tools and result processing; B, the freshness and comparison tools |
-| `scripts/bench/<experiment>.sh` | Whoever owns the experiment (§9); `trials.sh`, which they share, is D's, and `all.sh` is B's |
+| `scripts/bench/<experiment>.sh` | Whoever owns the experiment (§9); `trials.sh`, which they share, is D's, and `comparison-block.sh`, the flags of block `comparison`, and `all.sh` are B's |
 | `common`, `worker`, `SPEC.md`, parent `pom.xml`, `workload/` | All four, in a separate PR |
 | `README.md`, `benchmarks/figures.csv` | Each PR updates the lines of its piece; D updates the Status section when each gate closes |
 
@@ -1104,7 +1104,7 @@ What cannot be equal is the design itself. These differences are listed in the r
 
 In `W1` a book has one copy and a partition no backup, because there is one node: it measures the cost of one instance, not a redundant design. The professors accept a one-node baseline (November 24). `W2`, `W3` and `W4` are the three scaling configurations by machines the PDF asks for besides it (PDF §4.1), and `W2P4` puts the instances of `W4` on two computers, which separates what more processes give from what the network costs: the professors warn that the lab network is slow.
 
-**Experiments.** Each one is a script that deploys what it needs, measures and writes its own run.
+**Experiments.** Each one is a script that deploys what it needs, measures and writes its own run. Each also takes `--dry-run`, which prints its hypotheses and the trials or steps it would run, and runs nothing.
 
 | Experiment | Script | Owner | Runs on | Measures (PDF §4.2) |
 | --- | --- | --- | --- | --- |
@@ -1131,7 +1131,7 @@ In `W1` a book has one copy and a partition no backup, because there is one node
 5. One search phase per value of `TARANTINO_CLIENTS_LIST`: that many closed-loop clients on virtual threads, half on the gateway of `n1` and half on that of `n2`, send `GET /documents/{words}` with the queries of `workload/queries.txt`, for `TARANTINO_WARMUP_SECONDS` that are discarded and `TARANTINO_MEASUREMENT_SECONDS` that are stored. One request in 100 carries `X-Tarantino-Trace: 1`.
 6. `bench record` stops, `cluster/collect.sh` runs and `bench manifest trial` records the trial.
 
-The repetitions are interleaved: repetition 1 of every design, configuration and variant of the block, then repetition 2, so drift over a long session spreads across every configuration. `TARANTINO_REPETITIONS` is 3, because each trial deploys a cluster, and 5 if the trial durations measured in F4 show that it fits in the lab hours. Each script of block `comparison` takes `--repetition <n>` and then runs only the trials of that repetition, in a run of its own; without it, it runs every repetition, interleaved, in one run. `all.sh` calls the four scripts with repetition 1, then with repetition 2, and so on, and `bench comparison` reads every run of the block together.
+The repetitions are interleaved: repetition 1 of every design, configuration and variant of the block, then repetition 2, so drift over a long session spreads across every configuration. `TARANTINO_REPETITIONS` is 3, because each trial deploys a cluster, and 5 if the trial durations measured in F4 show that it fits in the lab hours. Each script of block `comparison` takes `--repetition <n>` and then runs only the trials of that repetition, in a run of its own; without it, it runs every repetition, interleaved, in one run. `all.sh` calls the four scripts with repetition 1, then with repetition 2, and so on, and `bench comparison <run dir>…` reads every run of the block and writes its three files into a run of its own, `<…>-comparison-<commit>`, whose manifest lists the runs it read. The flags of the block live in `scripts/bench/comparison-block.sh`.
 
 **Measures.** Each has one name and one unit in `summary.csv`, the same in both designs:
 
@@ -1208,7 +1208,7 @@ The report gives every step with its runs, says which one decided, where the cho
 | `placement/<trial>/<worker>-<moment>.json` | `GET /internal/placement?gc=true` of each worker, `empty` and `loaded`; `placement/<worker>-baseline.json` and `-recovered.json` in a fault run |
 | `equivalence/<trial>.json` | What `checks equivalence` compared: each instance, its index version and each query |
 | `coordination.csv` | Queue wait, download, indexing and time to publication of each book, from the transition lines |
-| `comparison.csv`, `pairs.csv`, `scaling.csv` | `design-comparison` and `grid-backups`, as said above |
+| `comparison.csv`, `pairs.csv`, `scaling.csv` | The run of `bench comparison` over block `comparison`: `design-comparison` and `grid-backups`, and the `pairs.csv` of `index-batch` and `doc-replicas`, as said above |
 | `freshness.csv` | `index-freshness` only: one row per book and eligible backend, with both instants and their raw difference |
 | `health.csv`, `routing.csv`, `trace.csv` | The Consul state of each `tarantino-query` instance every 200 ms, the members of `query_ready` after each render, and the events of a routing trace (§12.4) |
 | `matrix.csv` | `role-rotation` only: the node-by-task matrix (§13.4) |
