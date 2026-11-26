@@ -141,7 +141,7 @@ class NodeDocumentReaderTest {
     }
 
     @Test
-    void neverSilencesANodeOneOfWhoseWorkersAnswered() {
+    void neverSilencesANodeWhenOneOfItsWorkersWasReached() {
         locatedOn("n1");
         alive.add(new WorkerAddress("n1-w2", "n1", "10.0.0.1", 7010));
         workerAnswers.put("n1-w1", new DocumentAnswer.Unreachable());
