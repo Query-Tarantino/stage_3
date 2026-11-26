@@ -57,6 +57,11 @@ public class BatchCollector {
         queue.acknowledge();
     }
 
+    /** Closes its queue handle once its batch loop ends. */
+    public void close() {
+        queue.close();
+    }
+
     private static void add(Map<Integer, Instant> books, BookTask task) {
         books.merge(task.bookId(), task.enqueuedAt(), (earlier, later) -> earlier.isBefore(later) ? earlier : later);
     }

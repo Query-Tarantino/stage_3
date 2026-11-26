@@ -2,7 +2,9 @@ package org.ulpgc.tarantino.common.roles;
 
 /**
  * A role a worker starts and stops by assignment, without a restart (SPEC §13.3). {@code start()} and {@code stop()}
- * may be called again on the same instance, and {@code stop()} leaves no thread of the role behind.
+ * return at once: the role does its slow part on its own thread, and {@code state()} reports {@code STARTING} or
+ * {@code STOPPING} until it is done. They may be called again on the same instance, and once the role is
+ * {@code STOPPED} no thread of it is left.
  */
 public interface Role {
 

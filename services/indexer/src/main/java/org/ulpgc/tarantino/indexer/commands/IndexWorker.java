@@ -11,7 +11,7 @@ import java.util.function.Consumer;
 /**
  * The batch loop of the role {@code indexer}. If Mongo or Hazelcast fail halfway, it leaves the batch unpublished and
  * goes on: its lease expires and {@code control} sends its books back to the queue. Once asked to stop, it finishes the
- * batch it has open and returns (SPEC §13.3).
+ * batch it has open, closes its queue handle and returns (SPEC §13.3).
  */
 public class IndexWorker implements Runnable {
 
@@ -30,15 +30,23 @@ public class IndexWorker implements Runnable {
 
     @Override
     public void run() {
-        while (!stopping && !Thread.currentThread().isInterrupted()) {
-            try {
-                indexNextBatch();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            } catch (RuntimeException e) {
-                LOGGER.warn("Dropped a batch", e);
-                pauseAfterFailure();
+        try {
+            while (!stopping && !Thread.currentThread().isInterrupted()) {
+                indexNextBatchOrPause();
             }
+        } finally {
+            collector.close();
+        }
+    }
+
+    private void indexNextBatchOrPause() {
+        try {
+            indexNextBatch();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (RuntimeException e) {
+            LOGGER.warn("Dropped a batch", e);
+            pauseAfterFailure();
         }
     }
 

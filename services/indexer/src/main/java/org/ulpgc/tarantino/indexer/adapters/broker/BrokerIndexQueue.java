@@ -31,4 +31,9 @@ public class BrokerIndexQueue implements IndexQueue {
     public void acknowledge() {
         queue.acknowledge();
     }
+
+    @Override
+    public void close() {
+        queue.close();
+    }
 }

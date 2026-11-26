@@ -9,7 +9,8 @@ import java.util.function.Supplier;
 
 /**
  * The role {@code indexer} (SPEC §13.3): {@code start()} starts a new batch loop on its own thread, and {@code stop()}
- * lets it finish the batch it has open and waits for its thread to end. It can start again in the same process.
+ * asks it to finish the batch it has open; the loop's thread makes the role {@code STOPPED} when it returns, and only
+ * then can the role start again.
  */
 public class IndexerRole implements Role {
 
@@ -17,7 +18,6 @@ public class IndexerRole implements Role {
     private final Function<Runnable, Thread> threads;
     private volatile RoleState state = RoleState.STOPPED;
     private IndexWorker worker;
-    private Thread thread;
 
     /** {@code workers} gives a new batch loop for each start, and {@code threads} starts it on its own thread. */
     public IndexerRole(Supplier<IndexWorker> workers, Function<Runnable, Thread> threads) {
@@ -36,9 +36,15 @@ public class IndexerRole implements Role {
             return;
         }
         state = RoleState.STARTING;
-        worker = workers.get();
-        thread = threads.apply(worker);
-        state = RoleState.ACTIVE;
+        try {
+            IndexWorker life = workers.get();
+            worker = life;
+            state = RoleState.ACTIVE;
+            threads.apply(() -> runUntilStopped(life));
+        } catch (RuntimeException e) {
+            state = RoleState.STOPPED;
+            throw e;
+        }
     }
 
     @Override
@@ -48,8 +54,6 @@ public class IndexerRole implements Role {
         }
         state = RoleState.STOPPING;
         worker.stop();
-        awaitEnd(thread);
-        state = RoleState.STOPPED;
     }
 
     @Override
@@ -57,11 +61,11 @@ public class IndexerRole implements Role {
         return state;
     }
 
-    private static void awaitEnd(Thread thread) {
+    private void runUntilStopped(IndexWorker life) {
         try {
-            thread.join();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+            life.run();
+        } finally {
+            state = RoleState.STOPPED;
         }
     }
 }
