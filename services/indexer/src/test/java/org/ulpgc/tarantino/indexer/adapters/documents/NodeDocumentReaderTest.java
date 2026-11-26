@@ -42,6 +42,7 @@ class NodeDocumentReaderTest {
     private final Map<Integer, StoredDocument> stored = new HashMap<>();
     private final List<WorkerAddress> alive = new ArrayList<>(List.of(worker("n1"), worker("n2"), worker("n3"), worker("n4")));
     private final Map<String, DocumentAnswer> answers = new HashMap<>();
+    private final Map<String, DocumentAnswer> workerAnswers = new HashMap<>();
     private final List<String> asked = new ArrayList<>();
     private final MutableClock clock = new MutableClock();
 
@@ -130,6 +131,29 @@ class NodeDocumentReaderTest {
     }
 
     @Test
+    void readsFromTheSecondWorkerOfANodeWhenTheFirstCannotBeReached() {
+        locatedOn("n1");
+        alive.add(new WorkerAddress("n1-w2", "n1", "10.0.0.1", 7010));
+        workerAnswers.put("n1-w1", new DocumentAnswer.Unreachable());
+        workerAnswers.put("n1-w2", new DocumentAnswer.Copy(TEXT));
+
+        assertEquals(new BookLookup.Found(TEXT), reader().lookup(BOOK));
+    }
+
+    @Test
+    void neverSilencesANodeOneOfWhoseWorkersAnswered() {
+        locatedOn("n1");
+        alive.add(new WorkerAddress("n1-w2", "n1", "10.0.0.1", 7010));
+        workerAnswers.put("n1-w1", new DocumentAnswer.Unreachable());
+        workerAnswers.put("n1-w2", new DocumentAnswer.NoAnswer());
+        NodeDocumentReader reader = reader();
+
+        assertEquals(new BookLookup.Unavailable(), reader.lookup(BOOK));
+        assertEquals(new BookLookup.Unavailable(), reader.lookup(BOOK));
+        assertEquals(4, asked.size());
+    }
+
+    @Test
     void isUnavailableRatherThanLostWhenItsCopyHereCannotBeRead() throws IOException {
         locatedOn("n2");
         DatalakePaths paths = new DatalakePaths(datalake);
@@ -147,7 +171,7 @@ class NodeDocumentReaderTest {
     private NodeDocumentReader reader() {
         PeerDocuments peers = (worker, bookId) -> {
             asked.add(worker.node());
-            return answers.getOrDefault(worker.node(), new DocumentAnswer.NotHere());
+            return workerAnswers.getOrDefault(worker.workerId(), answers.getOrDefault(worker.node(), new DocumentAnswer.NotHere()));
         };
         return new NodeDocumentReader("n2", new BatchBasedDatalakeReader(datalake), bookId -> Optional.ofNullable(stored.get(bookId)),
                 () -> List.copyOf(alive), peers, clock, SILENCE);
