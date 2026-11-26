@@ -5,6 +5,7 @@ import org.ulpgc.tarantino.common.config.TarantinoConfig;
 import org.ulpgc.tarantino.common.messaging.Broker;
 import org.ulpgc.tarantino.common.messaging.MessagingContracts;
 import org.ulpgc.tarantino.common.mongo.BookStates;
+import org.ulpgc.tarantino.common.mongo.WorkerRegistry;
 import org.ulpgc.tarantino.common.operations.CrashPoints;
 import org.ulpgc.tarantino.common.operations.LeaseHeartbeat;
 import org.ulpgc.tarantino.common.operations.Replica;
@@ -15,18 +16,20 @@ import org.ulpgc.tarantino.common.terms.FileStopwordsLoader;
 import org.ulpgc.tarantino.common.terms.Tokenizer;
 import org.ulpgc.tarantino.indexer.adapters.broker.BrokerIndexQueue;
 import org.ulpgc.tarantino.indexer.adapters.datalake.batch.BatchBasedDatalakeReader;
+import org.ulpgc.tarantino.indexer.adapters.documents.HttpPeerDocuments;
+import org.ulpgc.tarantino.indexer.adapters.documents.NodeDocumentReader;
 import org.ulpgc.tarantino.indexer.adapters.http.BookRoutes;
 import org.ulpgc.tarantino.indexer.adapters.http.IndexRoutes;
 import org.ulpgc.tarantino.indexer.adapters.mongo.MongoBatchStore;
 import org.ulpgc.tarantino.indexer.adapters.mongo.MongoIndexStatus;
 import org.ulpgc.tarantino.indexer.adapters.mongo.MongoIndexWriter;
 import org.ulpgc.tarantino.indexer.adapters.mongo.MongoRebuilds;
+import org.ulpgc.tarantino.indexer.adapters.mongo.MongoStoredDocuments;
 import org.ulpgc.tarantino.indexer.commands.BatchCollector;
 import org.ulpgc.tarantino.indexer.commands.BookReader;
 import org.ulpgc.tarantino.indexer.commands.IndexBatchCommand;
 import org.ulpgc.tarantino.indexer.commands.IndexWorker;
 import org.ulpgc.tarantino.indexer.commands.IndexerRole;
-import org.ulpgc.tarantino.indexer.model.book.BookLookup;
 import org.ulpgc.tarantino.indexer.ports.BatchAnnouncer;
 import org.ulpgc.tarantino.indexer.ports.BooksToIndex;
 import org.ulpgc.tarantino.indexer.ports.sources.DatalakeReader;
@@ -58,7 +61,7 @@ public final class IndexerFactory {
 
     private static IndexBatchCommand indexCommand(TarantinoConfig config, Connections connections, MongoBatchStore batches,
                                                   BatchAnnouncer announcer) {
-        return new IndexBatchCommand(batches, new BookReader(datalakeReader(config), tokenizer(config)),
+        return new IndexBatchCommand(batches, new BookReader(documentReader(config, connections), tokenizer(config)),
                 new MongoIndexWriter(connections.database()), announcer, new TransitionLog(), new CrashPoints(config.crashAt()),
                 renewal -> LeaseHeartbeat.start(config.heartbeat(), renewal));
     }
@@ -77,9 +80,12 @@ public final class IndexerFactory {
         return task -> broker.offer(MessagingContracts.BOOKS_TO_INDEX, task);
     }
 
-    private static DatalakeReader datalakeReader(TarantinoConfig config) {
-        BatchBasedDatalakeReader node = new BatchBasedDatalakeReader(config.datalake());
-        return bookId -> node.bookText(bookId).<BookLookup>map(BookLookup.Found::new).orElseGet(BookLookup.Lost::new);
+    /** Each book from this node or from another alive one that holds it (SPEC §4.6). */
+    private static DatalakeReader documentReader(TarantinoConfig config, Connections connections) {
+        WorkerRegistry registry = new WorkerRegistry(connections.database());
+        return new NodeDocumentReader(config.node(), new BatchBasedDatalakeReader(config.datalake()),
+                new MongoStoredDocuments(connections.database()), () -> registry.alive(config.workerTimeout()),
+                new HttpPeerDocuments(config.peerTimeout()));
     }
 
     private static Tokenizer tokenizer(TarantinoConfig config) {

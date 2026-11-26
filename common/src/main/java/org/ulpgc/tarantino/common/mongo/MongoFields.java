@@ -43,6 +43,8 @@ public final class MongoFields {
     public static final String STARTED_AT = "started_at";
     public static final String ASSIGNED_AT = "assigned_at";
     public static final String HEARTBEAT_AT = "heartbeat_at";
+    public static final String LOCATIONS = "locations";
+    public static final String SHA256 = "sha256";
 
     private MongoFields() {
     }
